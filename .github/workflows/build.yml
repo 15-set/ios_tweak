@@ -134,6 +134,31 @@ jobs:
           dpkg-deb -I "$deb"
           dpkg-deb -c "$deb"
 
+      - name: 校验产物（切片数 / rootless 路径 / Info.plist）
+        run: |
+          set -e
+          deb=$(ls -t packages/*.deb | head -1)
+          rm -rf /tmp/chk && mkdir -p /tmp/chk
+          dpkg-deb -x "$deb" /tmp/chk
+          bundle=$(find /tmp/chk -type d -name "InsulationPrefs.bundle" | head -1)
+          exe="$bundle/InsulationPrefs"
+          dylib=$(find /tmp/chk -name "insulation.dylib" | head -1)
+          echo "== 布局 =="; echo "bundle=$bundle"; echo "dylib=$dylib"
+          for f in "$exe" "$dylib"; do
+            [ -f "$f" ] || { echo "FATAL: 缺少 $f"; exit 1; }
+            echo "== $f =="; file "$f"
+            # 回归护栏: clang-11 产出的 arm64e 是旧 ABI, 在 iOS 14+ 的 arm64e 设备上会把
+            # Settings 装载面板时打崩; 两个二进制都只允许 arm64 单切片
+            if file "$f" | grep -q "arm64e"; then
+              echo "FATAL: $f 含 arm64e 切片(clang-11 旧 ABI)"; exit 1
+            fi
+          done
+          echo "== 动态依赖 =="
+          grep -a -o "@rpath/[A-Za-z0-9_.]*" "$exe" | sort -u || true
+          echo "== Info.plist =="
+          python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print({k:d.get(k) for k in ('CFBundleIdentifier','CFBundleExecutable','CFBundlePackageType','NSPrincipalClass')})" "$bundle/Info.plist"
+          test -f "$bundle/Root.plist" || { echo "FATAL: bundle 缺 Root.plist"; exit 1; }
+
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v4
         with:
