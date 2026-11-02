@@ -1,0 +1,58 @@
+name: build-insulation
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  THEOS: /home/runner/theos
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # rootless: palera1n/Dopamine, iOS 15+, 产物 arch=iphoneos-arm64, 安装前缀 /var/jb
+        # rootful : 传统越狱, iOS 12.2~14, 产物 arch=iphoneos-arm
+        scheme: [rootless, rootful]
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git make perl clang ldid dpkg fakeroot \
+            libplist-utils libssl-dev zlib1g-dev zstd curl unzip ca-certificates
+          # libplist-utils 提供 plistutil: theos 需要它把旧式 ASCII 格式的
+          # insulation.plist (Substrate filter) 转成二进制 plist, 缺它会打包失败
+
+      - name: 安装 theos（官方安装脚本, 自动递归子模块 logos/libsubstrate 等）
+        run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+
+      - name: 安装 iOS SDK（theos/sdks, 取最新 master）
+        run: git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
+
+      - name: 编译
+        env:
+          THEOS_PACKAGE_SCHEME: ${{ matrix.scheme }}
+        run: make clean && make -j"$(nproc)"
+
+      - name: 打包并校验
+        env:
+          THEOS_PACKAGE_SCHEME: ${{ matrix.scheme }}
+        run: |
+          make package FINALPACKAGE=1
+          deb=$(ls -t packages/*.deb | head -1)
+          echo "产物: $deb ($(du -h "$deb" | cut -f1))"
+          dpkg-deb -I "$deb"
+          dpkg-deb -c "$deb"
+
+      - name: 上传 deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: insulation-${{ matrix.scheme }}
+          path: packages/*.deb
+          if-no-files-found: error

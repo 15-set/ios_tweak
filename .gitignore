@@ -1,0 +1,11 @@
+# 构建产物
+packages/
+*.deb
+
+# theos 本地状态
+.theos/
+obj/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
