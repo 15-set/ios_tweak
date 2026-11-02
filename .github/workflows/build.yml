@@ -38,22 +38,36 @@ jobs:
           # libplist-utils 提供 plistutil: theos 需要它把旧式 ASCII 格式的
           # insulation.plist (Substrate filter) 转成二进制 plist, 缺它会打包失败
 
-      - name: 安装 ldid（apt 优先, 失败则用 Procursus 预编译二进制兜底）
+      - name: 安装 ldid（release 单文件优先, 源码编译兜底; 不依赖 apt）
         run: |
           set -e
-          if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ldid; then
-            echo "ldid 来自 apt"
+          # 注: Ubuntu 24.04/26.04 仓库均无 ldid 包 (两次运行日志均证实), 放弃 apt 途径。
+          # 资产名已经 GitHub API 实测: v2.1.5-procursus7 的 ldid_linux_x86_64 为单文件二进制。
+          LDID_URL="https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64"
+          echo "== 方案1: 预编译单文件 =="
+          echo "URL: $LDID_URL"
+          code=$(curl -sSL -w "%{http_code}" --retry 3 -o /tmp/ldid "$LDID_URL" || echo "curl_exit_$?")
+          echo "HTTP=$code size=$(stat -c%s /tmp/ldid 2>/dev/null || echo 0) bytes"
+          file /tmp/ldid || true
+          if [ "$code" = "200" ] && file /tmp/ldid | grep -q ELF; then
+            sudo install -m 0755 /tmp/ldid /usr/local/bin/ldid
+            ldd /usr/local/bin/ldid || true
           else
-            echo "apt 无 ldid, 下载 ProcursusTeam/ldid v2.1.5-procursus7 预编译 x86_64 二进制"
-            mkdir -p "$HOME/bin"
-            curl -fsSL --retry 3 -o "$HOME/bin/ldid" \
-              https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64
-            chmod +x "$HOME/bin/ldid"
-            echo "$HOME/bin" >> "$GITHUB_PATH"
+            echo "方案1失败, 转方案2"
           fi
-          # 硬检查: 两级都失败则明确失败, 不静默继续
-          command -v ldid || { echo "FATAL: ldid 不可用"; exit 1; }
-          ldid 2>&1 | head -1 || true
+          if ! command -v ldid >/dev/null 2>&1; then
+            echo "== 方案2: 源码编译 (ProcursusTeam/ldid, 仓库根为 Makefile) =="
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              g++ make libssl-dev libplist-dev
+            git clone --depth 1 https://github.com/ProcursusTeam/ldid /tmp/ldid-src
+            make -C /tmp/ldid-src -j"$(nproc)"
+            sudo install -m 0755 /tmp/ldid-src/ldid /usr/local/bin/ldid
+          fi
+          hash -r
+          command -v ldid || { echo "FATAL: ldid 两种方案均失败"; exit 1; }
+          echo "== ldid 自检 =="
+          command -v ldid
+          ldid 2>&1 | head -2 || true   # ldid 无参数打印 usage 并返回非零, 属正常
 
       - name: 环境预检
         run: |
