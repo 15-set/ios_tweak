@@ -44,7 +44,7 @@ jobs:
           echo "== lipo =="; xcrun -f lipo
           echo "== python3 =="; python3 --version
 
-      - name: 安装依赖（Homebrew: ldid / xz / dpkg）
+      - name: 安装依赖（由 Homebrew 提供 ldid / xz / dpkg）
         run: |
           set -e
           # ldid : 签名(theos 在 macOS 上 TARGET_CODESIGN=ldid, TARGET_CODESIGN_FLAGS ?= -S)
