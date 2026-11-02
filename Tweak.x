@@ -91,6 +91,20 @@ static NSString *InsPrefsPath(void) {
 #define kInsDebugLogMaxPath 512
 static char gInsDebugLogPath[kInsDebugLogMaxPath];
 
+static NSString *InsErrName(int e) {
+    const char *n = "?";
+    switch (e) {
+        case EACCES: n = "EACCES"; break;
+        case EPERM:  n = "EPERM";  break;
+        case ENOENT: n = "ENOENT"; break;
+        case EROFS:  n = "EROFS";  break;
+        case ENOTDIR:n = "ENOTDIR";break;
+        case ENAMETOOLONG: n = "ENAMETOOLONG"; break;
+        default: break;
+    }
+    return [NSString stringWithFormat:@"%d(%s)", e, n];
+}
+
 static void InsDebugLog(NSString *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -101,16 +115,21 @@ static void InsDebugLog(NSString *fmt, ...) {
                        [NSDate date], getpid(), getuid(), line];
 
     if (gInsDebugLogPath[0] == '\0') {
-        /* 覆盖: 真实用户域 / jbroot 镜像 / 插件目录 / /tmp / /var/tmp, 最后用 HOME */
+        /* 顺序按“daemon 最可能可写”排列: Media → Preferences → 插件目录 → tmp → root */
         const char *fixedCands[] = {
+            "/var/mobile/Media/insulation-debug.log",
+            "/var/jb/var/mobile/Media/insulation-debug.log",
             "/var/mobile/Library/Preferences/insulation-debug.log",
             "/var/jb/var/mobile/Library/Preferences/insulation-debug.log",
             "/var/jb/Library/MobileSubstrate/DynamicLibraries/insulation-debug.log",
-            "/tmp/insulation-debug.log",
+            "/private/var/tmp/insulation-debug.log",
             "/var/tmp/insulation-debug.log",
+            "/tmp/insulation-debug.log",
+            "/var/root/insulation-debug.log",
         };
-        int errs[5] = {0};
-        for (int i = 0; i < 5; i++) {
+        const int candCount = (int)(sizeof(fixedCands) / sizeof(fixedCands[0]));
+        int errs[9] = {0};
+        for (int i = 0; i < candCount; i++) {
             int fd = open(fixedCands[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
             if (fd >= 0) {
                 close(fd);
@@ -130,8 +149,13 @@ static void InsDebugLog(NSString *fmt, ...) {
                 snprintf(gInsDebugLogPath, sizeof(gInsDebugLogPath), "%s", homePath.UTF8String);
                 NSLog(@"[Insulation][debuglog] 选用路径: %@", homePath);
             } else {
-                NSLog(@"[Insulation][debuglog] 全部路径失败 uid=%d HOME=%@ errno=[%d,%d,%d,%d,%d,%d]",
-                      getuid(), NSHomeDirectory(), errs[0], errs[1], errs[2], errs[3], errs[4], errno);
+                NSMutableString *detail = [NSMutableString string];
+                for (int i = 0; i < candCount; i++) {
+                    [detail appendFormat:@"%@=%@ ", [NSString stringWithUTF8String:fixedCands[i]], InsErrName(errs[i])];
+                }
+                [detail appendFormat:@"HOME=%@=%@", homePath, InsErrName(errno)];
+                NSLog(@"[Insulation][debuglog] 全部路径失败 uid=%d euid=%d | %@",
+                      getuid(), geteuid(), detail);
             }
         }
     }
@@ -523,6 +547,43 @@ static void InsApplyPowerMode(void) {
     notify_post(kInsNotifRuntimeState);
 }
 
+/* [B][INFERRED] 兜底捕获: 若 initForFastLoop: 没命中(或 hook 失败), 从同类的
+ * updateCPU / setCPULevel: 的 self 抓 MitigationController 实例。
+ * [EVIDENCE] 这两个 selector 都属于 MitigationController (Power_header/MitigationController.h)。
+ * 抓到后异步补一次 apply, 避免在 hook 内同步重入。 */
+static void InsCaptureController(MitigationController *mc) {
+    if (!mc) return;
+    BOOL first = NO;
+    os_unfair_lock_lock(&gLock);
+    if (gMitigationController == nil) {
+        gMitigationController = mc;
+        first = YES;
+    }
+    os_unfair_lock_unlock(&gLock);
+    if (!first) return;
+
+    InsDebugLog(@"capture: 兜底抓到 mc=%p", (void *)(__bridge void *)mc);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        InsApplyPowerMode();
+    });
+}
+
+/* [B][INFERRED] ctor 之后的定时兜底: initForFastLoop: 未命中时也能等到 controller。 */
+static void InsFallbackApply(int attempt) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (gMitigationController != nil) {
+            InsDebugLog(@"fallback: 第%d次已有 controller, 重新 apply", attempt);
+            InsApplyPowerMode();
+        } else if (attempt < 5) {
+            InsDebugLog(@"fallback: 第%d次仍无 controller, 继续等待", attempt);
+            InsFallbackApply(attempt + 1);
+        } else {
+            InsDebugLog(@"fallback: 5 次后仍无 controller (initForFastLoop 可能未命中)");
+        }
+    });
+}
+
 #pragma mark - Hook 1: CommonProduct  [UPSTREAM, 与上游 Tweak.x.swift 一致]
 
 %hook CommonProduct
@@ -683,6 +744,9 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
 }
 
 - (void)setCPULevel:(int)level {
+    /* [B] initForFastLoop 未命中时的兜底捕获点之一 */
+    if (gMitigationController == nil) InsCaptureController(self);
+
     InsPowerMode mode;
     os_unfair_lock_lock(&gLock); mode = gPowerMode; os_unfair_lock_unlock(&gLock);
     if (mode == InsPowerModeFullPower && level != 0) {
@@ -698,6 +762,12 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
         %orig(2);
         return;
     }
+    %orig;
+}
+
+- (void)updateCPU {
+    /* [B] 兜底捕获点之二: thermalmonitord 热循环会周期性调用 updateCPU */
+    if (gMitigationController == nil) InsCaptureController(self);
     %orig;
 }
 
@@ -900,6 +970,10 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
 
 %ctor {
     @autoreleasepool {
+        /* [A] 心跳: 证明代码执行到了 ctor、以什么身份执行; 位于 %init 之前。 */
+        InsDebugLog(@"hello pid=%d uid=%d euid=%d mode=%ld",
+                    getpid(), getuid(), geteuid(), (long)gPowerMode);
+
         InsReloadPrefs();
 
         /* [EVIDENCE] runtime state notify token */
@@ -918,8 +992,10 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
         %init;
 
         /* daemon 启动路径: ctor 已读到新的 thermalPowerMode; 此处若 MitigationController
-         * 尚未创建则自动推迟, 由 initForFastLoop: 应用。 */
+         * 尚未创建则自动推迟, 由 initForFastLoop: 应用。
+         * [B] 再叠加 2s 定时兜底(最多 5 次): 即使 initForFastLoop: 未命中也能补 apply。 */
         InsApplyPowerMode();
+        InsFallbackApply(1);
 
         os_unfair_lock_lock(&gLock);
         InsPowerMode startupMode = gPowerMode;
