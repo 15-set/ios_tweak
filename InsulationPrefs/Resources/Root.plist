@@ -28,13 +28,6 @@
 			<string>com.be-huge.insulation-prefs</string>
 			<key>cell</key>
 			<string>PSLinkListCell</string>
-			<!-- [FIX-A] 0.0.18 的该 cell 没有 detail; 在 iOS 15/16 上点击会被推到
-			     一个没有任何选项数据源的空白控制器(即用户看到的"空白页")。
-			     补上 detail=PSListItemsController 即恢复原版交互:
-			     点击 → 进入选项列表页, 选项来自下方 validValues/validTitles。
-			     选项文案/数量/默认值/key/通知均未改动。 -->
-			<key>detail</key>
-			<string>PSListItemsController</string>
 			<key>label</key>
 			<string>CPU 模式</string>
 			<key>key</key>

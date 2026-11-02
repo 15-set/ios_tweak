@@ -11,6 +11,7 @@
  */
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
+#import <UIKit/UIKit.h>
 #import <CoreFoundation/CFNotificationCenter.h>
 
 /* [BUILD-FIX] 与原 Tweak.x 同一问题: theos 的 libroot 没有 jbroot(), 真实 API 是
@@ -85,6 +86,71 @@ static NSString *InsPrefsPath(void) {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              (__bridge CFStringRef)notification, NULL, NULL, true);
     }
+}
+
+#pragma mark - CPU 模式: 原版「选中即生效」交互
+
+/* [EVIDENCE] 0.0.18 面板二进制里的字符串:
+ *   tableView:didSelectRowAtIndexPath: / cpuModeMenuOverlay / cpuModeMenuItemTapped:
+ *   cpuModeKey / cpuModeValues / cpuModeTitles / dismissCPUModeMenu
+ *   writeToFile:atomically: / _CFNotificationCenterPostNotification
+ * → 原版根本不用 detail 跳页: 它在 didSelectRowAtIndexPath: 里弹出自己的选项菜单,
+ *   选中后由面板自己写 plist 并立刻发 com.be-huge.insulation-executePuppetEvent,
+ *   dylib 收到后马上重读并应用 thermalPowerMode(因此无需 respring)。
+ *
+ * 我们此前补 detail=PSListItemsController 造成两个偏差:
+ *   1) 交互变成"跳页"(原版是就地弹菜单);
+ *   2) 写值由系统 PSListItemsController 走 CFPreferences 域, 不经过本类的
+ *      setPreferenceValue:(自写 plist + 按 PostNotification 发通知),
+ *      于是 tweak 收不到通知 / 读到的还是旧值 → "选了模拟低电频率但不生效"。
+ * 这里恢复原版机制: 点行 → 弹菜单 → 本类写 plist + 发通知 + 刷新 cell 显示。
+ * 其余 cell(开关/分组)不在本方法处理, 交回 super。 */
+
+- (PSSpecifier *)ins_specifierForKey:(NSString *)key {
+    for (PSSpecifier *s in [self specifiers]) {
+        if ([s.properties[@"key"] isEqualToString:key]) return s;
+    }
+    return nil;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *spec = [self ins_specifierForKey:@"thermalPowerMode"];
+    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    id label = spec.properties[@"label"];
+
+    /* 只有「CPU 模式」这一行走自定义菜单, 其余保持系统默认行为 */
+    if (!spec || ![cell.textLabel.text isEqualToString:label]) {
+        [super tableView:tableView didSelectRowAtIndexPath:indexPath];
+        return;
+    }
+
+    [tableView deselectRowAtIndexPath:indexPath animated:NO];
+
+    NSArray *values = spec.properties[@"validValues"];
+    NSArray *titles = spec.properties[@"validTitles"];
+    if (values.count == 0) return;
+
+    UIAlertController *menu = [UIAlertController alertControllerWithTitle:label
+                                                                  message:nil
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSUInteger i = 0; i < values.count; i++) {
+        id value = values[i];
+        NSString *title = (i < titles.count) ? titles[i] : [value description];
+        [menu addAction:[UIAlertAction actionWithTitle:title
+                                                 style:UIAlertActionStyleDefault
+                                               handler:^(UIAlertAction *action) {
+            /* 走本类覆写: 直接写 plist 文件 + 按 specifier 的 PostNotification 发通知 */
+            [self setPreferenceValue:value specifier:spec];
+            [self reloadSpecifier:spec animated:YES];
+        }]];
+    }
+    [menu addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    if (menu.popoverPresentationController) {   /* iPad 上 action sheet 需要锚点, 否则崩溃 */
+        menu.popoverPresentationController.sourceView = cell;
+        menu.popoverPresentationController.sourceRect = cell.bounds;
+    }
+    [self presentViewController:menu animated:YES completion:nil];
 }
 
 @end
