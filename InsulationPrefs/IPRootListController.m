@@ -12,6 +12,7 @@
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
 #import <UIKit/UIKit.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <CoreFoundation/CFNotificationCenter.h>
 
 /* [BUILD-FIX] 与原 Tweak.x 同一问题: theos 的 libroot 没有 jbroot(), 真实 API 是
@@ -23,6 +24,10 @@
 #endif
 
 #define kInsPrefsPathRel @"/var/mobile/Library/Preferences/com.be-huge.insulation-prefs.plist"
+/* [FIX-CFPREFS] 面板侧统一改走 CFPreferences: 与 cfprefsd 协作, `defaults read` 立即可见,
+ * 且不会再出现"直写文件 → cfprefsd 缓存仍旧 / flush 时覆盖"的经典问题。
+ * 域必须与 Root.plist 的 defaults 字段、文件名完全一致。 */
+static NSString *const kInsPrefsDomain = @"com.be-huge.insulation-prefs";
 
 static NSString *InsPrefsPath(void) {
     static NSString *path = nil;
@@ -54,29 +59,43 @@ static NSString *InsPrefsPath(void) {
     return specifiers;
 }
 
-/* [UPSTREAM] 直接读 plist 文件, 缺省回退 specifier 的 default
+/* [FIX-CFPREFS] 面板读值优先走 CFPreferences(与 cfprefsd 一致), 取不到再回退直读文件
  * [FIX] key / 路径为 nil 时不再把 nil 交给 dictionaryWithContentsOfFile: / 下标 */
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
     id def = specifier.properties[@"default"];
     id key = specifier.properties[@"key"];
+    if (!key) return def;
+
+    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                    (__bridge CFStringRef)kInsPrefsDomain);
+    if (v) return (__bridge_transfer id)v;
+
     NSString *path = InsPrefsPath();
-    if (!key || !path) return def;
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:path];
+    NSDictionary *prefs = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
     return prefs[key] ?: def;
 }
 
-/* [UPSTREAM + NEW] 直接写 plist 文件, 然后按 specifier 的 PostNotification 发 Darwin 通知 */
+/* [FIX-CFPREFS] 写入改走 CFPreferences + CFPreferencesAppSynchronize:
+ *   1) `defaults read com.be-huge.insulation-prefs thermalPowerMode` 立即可见;
+ *   2) 不再与 cfprefsd 缓存打架(直写文件会被 flush 覆盖);
+ *   3) 同步落盘后再发 Darwin 通知, tweak 侧直读文件不会读到旧值。
+ * 仍按 specifier 的 PostNotification 发 Darwin 通知(原版 executePuppetEvent 语义)。 */
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     NSString *key = specifier.properties[@"key"];
-    NSString *path = InsPrefsPath();
-    /* [FIX] 原实现会把 nil key 交给 prefs[key] = ... (KVC/字典 nil key 抛异常),
-     *       nil 路径交给 writeToFile: → 直接放弃本次写入, 不影响面板其余交互 */
-    if (!key || !path) return;
+    if (!key || !value) return;
 
-    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary new];
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                             (__bridge CFPropertyListRef)value,
+                             (__bridge CFStringRef)kInsPrefsDomain);
+    Boolean synced = CFPreferencesAppSynchronize((__bridge CFStringRef)kInsPrefsDomain);
 
-    prefs[key] = value;
-    [prefs writeToFile:path atomically:YES];
+    /* [DIAG] 回读确认, 便于一次定位"到底写没写进去" */
+    CFPropertyListRef readback = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                           (__bridge CFStringRef)kInsPrefsDomain);
+    NSLog(@"[InsulationPrefs] key=%@ value=%@ 已同步 (domain=%@ sync=%d readback=%@)",
+          key, value, kInsPrefsDomain, (int)synced,
+          readback ? (__bridge id)readback : @"(nil)");
+    if (readback) CFRelease(readback);
 
     /* [UPSTREAM] 按 cell 声明的 PostNotification 发 Darwin 通知
      * (原面板对 thermalPowerMode 发 com.be-huge.insulation-executePuppetEvent;
@@ -114,12 +133,24 @@ static NSString *InsPrefsPath(void) {
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    PSSpecifier *spec = [self ins_specifierForKey:@"thermalPowerMode"];
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    PSSpecifier *spec = [self ins_specifierForKey:@"thermalPowerMode"];
     id label = spec.properties[@"label"];
 
-    /* 只有「CPU 模式」这一行走自定义菜单, 其余保持系统默认行为 */
-    if (!spec || ![cell.textLabel.text isEqualToString:label]) {
+    /* [FIX-A2] 不能只靠 cell 文本比较(文本可能尚未布局为 nil / 带空格):
+     * 优先取 cell 自身的 specifier(PSTableCell.specifier) 比对 key, 取不到再退回文本比较。
+     * 只有「CPU 模式」这一行走自定义菜单, 其余保持系统默认行为。 */
+    BOOL isCPURow = NO;
+    if (spec) {
+        id cellSpec = nil;
+        @try { cellSpec = [cell valueForKey:@"specifier"]; } @catch (NSException *e) { cellSpec = nil; }
+        if ([cellSpec isKindOfClass:[PSSpecifier class]]) {
+            id cellKey = ((PSSpecifier *)cellSpec).properties[@"key"];
+            isCPURow = [cellKey isEqualToString:@"thermalPowerMode"];
+        }
+        if (!isCPURow) isCPURow = [cell.textLabel.text isEqualToString:label];
+    }
+    if (!isCPURow) {
         [super tableView:tableView didSelectRowAtIndexPath:indexPath];
         return;
     }

@@ -234,6 +234,9 @@ static void InsReloadPrefs(void) {
 
     os_unfair_lock_unlock(&gLock);
 
+    /* [DIAG] 每次重载都打印实际读到的值, 与面板侧 "已同步" 日志成对定位 */
+    ILog(@"读取偏好: path=%@ thermalPowerMode=%@", InsPrefsPath(), mode);
+
     if (wasReleased != enabled) {
         ILog(@"电池温控控制权: %@ | 开关=%@ | CPU 路径不受影响(永不放行)",
              enabled ? @"已永久交还原生" : @"插件接管(原行为)",
@@ -683,13 +686,47 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
 #pragma mark - 初始化  [UPSTREAM InsulationTInit + NEW]
 
 static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    os_unfair_lock_lock(&gLock);
+    InsPowerMode beforeMode = gPowerMode;
+    BOOL beforeReleased = gBatteryThermalReleased;
+    os_unfair_lock_unlock(&gLock);
+
     InsReloadPrefs();
     NSString *n = (__bridge NSString *)name;
-    if ([n isEqualToString:@kInsNotifExecutePuppet]) {
+    BOOL isPuppet  = [n isEqualToString:@kInsNotifExecutePuppet];
+    BOOL isBattery = [n isEqualToString:@kInsNotifBatteryChanged];
+
+    if (isPuppet) {
         /* [UPSTREAM] executePuppetEvent → 应用 thermalPowerMode (0.0.18 的 puppet 即 power mode) */
         InsApplyPowerMode();
         InsApplyAdvancedSwitches();
     }
+
+    os_unfair_lock_lock(&gLock);
+    BOOL modeSame     = (gPowerMode == beforeMode);
+    BOOL releasedSame = (gBatteryThermalReleased == beforeReleased);
+    os_unfair_lock_unlock(&gLock);
+
+    /* [FIX] 面板写 cfprefsd 到文件落盘有微小延迟: 通知先到、文件还是旧值时,
+     *       0.4s 后再重读一次; 只处理确实变了的情况(幂等, 不改原语义)。
+     *       电池开关只需重读(热路径直接读 gBatteryThermalReleased), 不需要 apply。 */
+    if ((isPuppet && modeSame) || (isBattery && releasedSame)) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            InsReloadPrefs();
+
+            os_unfair_lock_lock(&gLock);
+            BOOL modeChanged = (gPowerMode != beforeMode);
+            os_unfair_lock_unlock(&gLock);
+
+            if (isPuppet && modeChanged) {
+                ILog(@"[recheck] thermalPowerMode 已更新, 重新应用");
+                InsApplyPowerMode();
+                InsApplyAdvancedSwitches();
+            }
+        });
+    }
+
     /* [NEW] 「电池原生温控」开关: InsReloadPrefs 已把开关状态直通到
      *       gBatteryThermalReleased(不做充电/温度判断), 此处无需再求值;
      *       控制权变化日志已在 InsReloadPrefs 内输出。 */
