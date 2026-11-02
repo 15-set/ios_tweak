@@ -80,8 +80,29 @@ jobs:
       - name: 安装 theos（官方安装脚本, 自动递归子模块 logos/libsubstrate 等）
         run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
 
-      - name: 安装 iOS SDK（theos/sdks, 取最新 master）
-        run: git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
+      - name: 安装 iOS SDK（theos/sdks; clone 失败自动降级 tarball）
+        run: |
+          set -e
+          # theos/sdks 仓库极大(含多个解压后的 SDK), git smart-http 大仓库 clone
+          # 常见 "RPC failed / early EOF"; 加大 buffer, 失败则降级 codeload tarball
+          git config --global http.postBuffer 524288000
+          ok=0
+          for i in 1 2; do
+            echo "== 尝试 git clone (第 $i 次) =="
+            if git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"; then ok=1; break; fi
+            rm -rf "$THEOS/sdks"; sleep 5
+          done
+          if [ "$ok" != "1" ]; then
+            echo "== 降级: codeload tarball =="
+            curl -fsSL --retry 3 -o /tmp/sdks.tar.gz \
+              https://codeload.github.com/theos/sdks/tar.gz/refs/heads/master
+            echo "tarball size: $(stat -c%s /tmp/sdks.tar.gz) bytes"
+            tar -xzf /tmp/sdks.tar.gz -C "$THEOS"
+            mv "$THEOS/sdks-master" "$THEOS/sdks"
+          fi
+          echo "== 已安装 SDK =="
+          ls "$THEOS/sdks" | tee /dev/stderr
+          ls -d "$THEOS"/sdks/iPhoneOS*.sdk >/dev/null || { echo "FATAL: 无 iPhoneOS SDK"; exit 1; }
 
       - name: 编译
         env:
