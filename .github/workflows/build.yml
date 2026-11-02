@@ -121,11 +121,10 @@ jobs:
           make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "== 构建里出现的 -target =="
           grep -o -E -- '-target [a-z0-9]+-apple-ios[0-9.]+' "$RUNNER_TEMP/build.log" | sort -u || true
-          echo "== arm64e 编译次数 =="; grep -c -- '-arch arm64e' "$RUNNER_TEMP/build.log" || true
-          if [ "$SCHEME" != "rootful" ]; then
-            n=$(grep -c -- '-arch arm64e' "$RUNNER_TEMP/build.log" || true)
-            [ "${n:-0}" -gt 0 ] || { echo "FATAL: 构建未使用 arm64e 编译(ARCHS 未生效)"; exit 1; }
-          fi
+          # 注意: 不能用 `grep -c -- '-arch arm64e' build.log` 判断 ARCHS。
+          # theos 的 make 只回显 `==> Compiling Tweak.x (arm64e)` 这类标签, 不回显完整编译命令行,
+          # 该计数恒为 0 → 必然误报(上一版就因此把成功的 rootless 构建判成失败)。
+          # 双切片由后面「校验产物」的 lipo 断言保证, 这里不再做任何基于日志文本的 ARCHS 判断。
           if grep -q 'incompatible arm64e ABI' "$RUNNER_TEMP/build.log"; then
             echo "FATAL: 链接器报告 arm64e ABI 不兼容(工具链/libroot stub 不一致)"; exit 1
           fi
