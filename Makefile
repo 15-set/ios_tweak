@@ -26,12 +26,15 @@ endif
 #   结论: 目标进程架构决定可加载切片, 必须带上 arm64e 切片(独立 App 进程的 arm64 回退规则不适用)。
 #
 #   arm64e 必须是 iOS 14+ 的 ABI v2 (ptrauth):
-#     - theos 自带的 Linux 工具链 clang-11 只能产出 v1(旧 ABI), 会被系统拒绝;
-#     - CI 已把这套工具链的 clang 入口换成 clang-16 (.github/workflows/build.yml
-#       「把 theos 工具链的 clang 换成 clang-16」), 且 SDK>=13 时 theos 自己会传
-#       `-target arm64e-apple-ios15.0`; clang>=12 且部署目标>=14.0 才产出 v2;
-#     - 同时要 `IS_NEW_ABI=1` 链接 $THEOS/lib/libroot.a(v2 stub), 否则会混入
-#       libroot_oldabi.a 的 v1 arm64e 对象, ld64 报 "incompatible arm64e ABI compiler"。
+#     - 只有 Apple 下游 clang(Xcode 自带)能产出 v2; 实测 Ubuntu clang-16 即便传
+#       `-target arm64e-apple-ios15.0` 仍产出 v1(cpusubtype=0x00000002), 会被系统拒绝;
+#       theos 源码也把非 macOS 的 IS_NEW_ABI 强制为 0 → Linux 构建路径不可行;
+#     - CI 因此改用 macOS runner + Xcode iPhoneOS SDK(.github/workflows/build.yml);
+#       SDK>=13 时 theos 自己会传 `-target arm64e-apple-ios15.0`, Apple clang>=12 且
+#       部署目标>=14.0 才产出 v2;
+#     - macOS 上 theos 自动判定 IS_NEW_ABI=1 并链接 $THEOS/lib/libroot.a(v2 stub),
+#       无需手动传 IS_NEW_ABI=1; 若混入 libroot_oldabi.a 的 v1 arm64e 对象,
+#       ld64 会报 "incompatible arm64e ABI compiler"。
 #
 #   rootful 仍只能用 arm64:
 #     部署目标 12.2 < 14.0, clang>=12 不再为 iOS<14 生成 arm64e(v1), 双切片会直接链接失败;

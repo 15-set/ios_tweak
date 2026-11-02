@@ -4,16 +4,22 @@ on:
   push:
   workflow_dispatch:
 
-env:
-  THEOS: /home/runner/theos
-
 jobs:
   build:
-    # 锁定 ubuntu-24.04, 不用 ubuntu-latest:
-    # 2026-11 起 latest 已切到 26.04 "resolute", 其仓库无 ldid 包
-    # (实测日志: "E: Unable to locate package ldid"), 且新 glibc 环境
-    # 可能给 theos/ldid 引入额外风险。24.04 仓库含 ldid 与 libplist-utils。
-    runs-on: ubuntu-24.04
+    # [BUILD-FIX-H] 改用 macOS runner 构建:
+    #   arm64e 的 ABI v2(ptrauth, cpusubtype 带 0x80000000 标记)只有 Apple 下游 clang 能产出。
+    #   实测证据: Ubuntu clang 16.0.6 + `-target arm64e-apple-ios15.0` 仍产出 v1
+    #   (cpusubtype=0x00000002, file 输出 "arm64e 00"), 自检步骤已拦下;
+    #   theos 源码本身也把非 macOS 平台的 IS_NEW_ABI 强制为 0
+    #   (makefiles/instance/rules.mk L124-131: "On non macOS, always use old ABI as only
+    #   macOS can compile with new ABI"), 即 Linux 上连 libroot stub 都会链接 v1 版本。
+    #   → 放弃 Linux 路径, 回到 macOS + Xcode 自带 Apple clang。
+    #
+    #   macOS 上不需要 theos/sdks: theos 会把 Xcode 的 iPhoneOS SDK 目录加入候选
+    #   (makefiles/targets/_common/darwin_head.mk L107-112), TARGET 的 `latest` 段
+    #   会解析到 Xcode 里版本最高的 iPhoneOS*.sdk; IS_NEW_ABI 由 clang 版本自动判定为 1
+    #   (同文件 rules.mk L125-137), 因此不再需要 IS_NEW_ABI=1 覆盖。
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
@@ -24,168 +30,65 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
-      - name: 安装构建依赖（不含 ldid, 单独处理）
+      - name: 准备环境变量与工具链预检（Xcode / clang / ld）
         run: |
           set -e
-          # Azure apt 源偶发 403/Hash Sum mismatch 是 Actions 高频瞬态失败, update 加重试
-          for i in 1 2 3; do
-            sudo apt-get update -y && break
-            echo "apt-get update 第 $i 次失败, 10s 后重试"; sleep 10
-          done
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git make perl clang dpkg fakeroot \
-            libplist-utils libssl-dev zlib1g-dev zstd curl unzip ca-certificates
-          # libplist-utils 提供 plistutil: theos 需要它把旧式 ASCII 格式的
-          # insulation.plist (Substrate filter) 转成二进制 plist, 缺它会打包失败
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "== xcode-select =="; xcode-select -p
+          echo "== xcodebuild =="; xcodebuild -version
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK=$SDK"
+          echo "SDK 版本: $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "== Apple clang =="; "$(xcrun --sdk iphoneos -f clang)" --version | head -3
+          echo "== ld =="; ld -v 2>&1 | head -2
+          echo "== lipo =="; xcrun -f lipo
+          echo "== python3 =="; python3 --version
 
-      - name: 安装新 clang（arm64e ABI v2 需要 clang>=12; theos 自带的是 clang-11）
+      - name: 安装依赖（Homebrew: ldid / xz / dpkg）
         run: |
           set -e
-          ver=""
-          # Ubuntu 24.04 仓库提供 clang-16/17/18; 逐个尝试, 成功即停
-          for v in 16 18 17 15; do
-            echo "== 尝试 clang-$v =="
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              "clang-$v" "libc++-$v-dev" "libc++abi-$v-dev" || continue
-            if command -v "clang-$v" >/dev/null 2>&1; then ver=$v; break; fi
-          done
-          if [ -z "$ver" ]; then
-            echo "== 退路: 只装 clang 本身 =="
-            for v in 16 18 17 15; do
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "clang-$v" || continue
-              command -v "clang-$v" >/dev/null 2>&1 && { ver=$v; break; }
-            done
-          fi
-          [ -n "$ver" ] || { echo "FATAL: 新 clang 安装失败"; exit 1; }
-          echo "CLANG_VER=$ver" >> "$GITHUB_ENV"
-          echo "== 选中 clang-$ver =="
-          "clang-$ver" --version | head -3
-          # ObjC++/Logos 预处理会吃 -stdlib=libc++ 的头文件
-          ls "/usr/lib/llvm-$ver/include/c++/v1/__config" >/dev/null 2>&1 \
-            && echo "libc++ 头已就位" || echo "WARN: libc++ 头缺失(libc++-$ver-dev 未装成功)"
+          # ldid : 签名(theos 在 macOS 上 TARGET_CODESIGN=ldid, TARGET_CODESIGN_FLAGS ?= -S)
+          # xz   : theos 自带 bin/dm.pl 用 lzma 压缩 deb
+          # dpkg : 仅供校验阶段用 dpkg-deb -I/-c/-x 检查产物, 不参与打包(打包仍走 dm.pl)
+          brew install ldid xz dpkg || brew upgrade ldid xz dpkg || true
+          command -v ldid; ldid 2>&1 | head -2 || true
+          command -v xz
+          command -v dpkg-deb
 
-      - name: 安装 ldid（release 单文件优先, 源码编译兜底; 不依赖 apt）
+      - name: 安装 theos（git clone --recursive, 不拉 theos/sdks）
         run: |
           set -e
-          # 注: Ubuntu 24.04/26.04 仓库均无 ldid 包 (两次运行日志均证实), 放弃 apt 途径。
-          # 资产名已经 GitHub API 实测: v2.1.5-procursus7 的 ldid_linux_x86_64 为单文件二进制。
-          LDID_URL="https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64"
-          echo "== 方案1: 预编译单文件 =="
-          echo "URL: $LDID_URL"
-          code=$(curl -sSL -w "%{http_code}" --retry 3 -o /tmp/ldid "$LDID_URL" || echo "curl_exit_$?")
-          echo "HTTP=$code size=$(stat -c%s /tmp/ldid 2>/dev/null || echo 0) bytes"
-          file /tmp/ldid || true
-          if [ "$code" = "200" ] && file /tmp/ldid | grep -q ELF; then
-            sudo install -m 0755 /tmp/ldid /usr/local/bin/ldid
-            ldd /usr/local/bin/ldid || true
-          else
-            echo "方案1失败, 转方案2"
-          fi
-          if ! command -v ldid >/dev/null 2>&1; then
-            echo "== 方案2: 源码编译 (ProcursusTeam/ldid, 仓库根为 Makefile) =="
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              g++ make libssl-dev libplist-dev
-            git clone --depth 1 https://github.com/ProcursusTeam/ldid /tmp/ldid-src
-            make -C /tmp/ldid-src -j"$(nproc)"
-            sudo install -m 0755 /tmp/ldid-src/ldid /usr/local/bin/ldid
-          fi
-          hash -r
-          command -v ldid || { echo "FATAL: ldid 两种方案均失败"; exit 1; }
-          echo "== ldid 自检 =="
-          command -v ldid
-          ldid 2>&1 | head -2 || true   # ldid 无参数打印 usage 并返回非零, 属正常
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          echo "== theos 目录 =="; ls "$THEOS"
+          if [ -e "$THEOS/bin/dm.pl" ]; then echo "dm.pl 就位"; else echo "WARN: 缺 dm.pl, 打包可能失败"; fi
+          # theos 在 macOS 上使用:
+          #   TARGET_CC  = $(xcrun -sdk iphoneos -f clang)   (Apple clang, >=12)
+          #   TARGET_LD  = $(xcrun -sdk iphoneos -f clang)   (由 clang 驱动调用 ld64)
+          #   TARGET_LIPO= $(xcrun -f lipo)                  → 按 arch 递归编译后 lipo 合并成 fat
+          #   TARGET_CODESIGN = ldid                          (brew 提供)
 
-      - name: 环境预检
-        run: |
-          echo "== os =="; . /etc/os-release; echo "$PRETTY_NAME"
-          echo "== ldid =="; command -v ldid
-          echo "== plistutil =="; command -v plistutil
-          echo "== clang =="; clang --version | head -1
-          echo "== THEOS =="; echo "$THEOS"; [ -d "$THEOS" ] && echo "(已存在)" || echo "(尚未安装, 预期)"
-
-      - name: 安装 theos（官方安装脚本, 自动递归子模块 logos/libsubstrate 等）
-        run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-
-      - name: 安装 iOS SDK（theos/sdks; clone 失败自动降级 tarball）
+      - name: 自检 Apple clang 产 arm64e ABI v2
         run: |
           set -e
-          # theos/sdks 仓库极大(含多个解压后的 SDK), git smart-http 大仓库 clone
-          # 常见 "RPC failed / early EOF"; 加大 buffer, 失败则降级 codeload tarball
-          git config --global http.postBuffer 524288000
-          ok=0
-          for i in 1 2; do
-            echo "== 尝试 git clone (第 $i 次) =="
-            if git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"; then ok=1; break; fi
-            rm -rf "$THEOS/sdks"; sleep 5
-          done
-          if [ "$ok" != "1" ]; then
-            echo "== 降级: codeload tarball =="
-            curl -fsSL --retry 3 -o /tmp/sdks.tar.gz \
-              https://codeload.github.com/theos/sdks/tar.gz/refs/heads/master
-            echo "tarball size: $(stat -c%s /tmp/sdks.tar.gz) bytes"
-            tar -xzf /tmp/sdks.tar.gz -C "$THEOS"
-            mv "$THEOS/sdks-master" "$THEOS/sdks"
-          fi
-          echo "== 已安装 SDK =="
-          ls "$THEOS/sdks" | tee /dev/stderr
-          ls -d "$THEOS"/sdks/iPhoneOS*.sdk >/dev/null || { echo "FATAL: 无 iPhoneOS SDK"; exit 1; }
-
-      - name: 把 theos 工具链的 clang 换成 clang-16（产 arm64e ABI v2）
-        env:
-          CLANG_VER: ${{ env.CLANG_VER }}
-        run: |
-          set -e
-          TB="$THEOS/toolchain/linux/iphone/bin"
-          [ -d "$TB" ] || { echo "FATAL: 缺少 $TB (theos 未安装成功?)"; exit 1; }
-          echo "== 替换前 =="
-          "$TB/clang" --version 2>&1 | head -2 || true
-          # theos 选编译器的确切机制(makefiles/targets/Linux/iphone.mk + _common/darwin_head.mk):
-          #   SDKBINPATH := $THEOS/toolchain/linux/iphone/bin
-          #   若存在 $TB/arm64-apple-darwin14-ld → _THEOS_TARGET_SDK_BIN_PREFIX=arm64-apple-darwin14-
-          #   → PREFIX=$TB/arm64-apple-darwin14-; TARGET_CC ?= $(PREFIX)clang
-          #   → 实际被调用的是 $TB/arm64-apple-darwin14-clang / ...-clang++
-          #   目标三元组由 theos 在 SDK>=13 时自己用 `-target arm64e-apple-ios15.0` 传入
-          #   (_common/darwin_tail.mk 的 VERSIONFLAGS), ld 由 `-fuse-ld=$TB/...-ld` 指定;
-          #   因此只需把这几个 clang 入口指向 clang-16, 其余(theos ld64/lipo/ldid)保持不动。
-          for f in "$TB"/*clang "$TB"/*clang++; do
-            [ -e "$f" ] || continue
-            case "$(basename "$f")" in
-              *++*) ln -sfn "/usr/bin/clang++-$CLANG_VER" "$f" ;;
-              *)    ln -sfn "/usr/bin/clang-$CLANG_VER"   "$f" ;;
-            esac
-            echo "linked: $(basename "$f") -> $(readlink -f "$f")"
-          done
-          hash -r
-          # 解析 theos 实际会调用的入口(顺序与 makefiles/targets/Linux/iphone.mk 一致)
-          if [ -e "$TB/armv7-apple-darwin11-ld" ]; then CC="$TB/armv7-apple-darwin11-clang"
-          elif [ -e "$TB/arm64-apple-darwin14-ld" ]; then CC="$TB/arm64-apple-darwin14-clang"
-          else CC="$TB/clang"; fi
-          echo "== 替换后 (theos 将调用: $CC) =="
-          "$CC" --version | head -3
-
-      - name: 自检 clang / ld 版本与 arm64e ABI v2
-        run: |
-          set -e
-          TB="$THEOS/toolchain/linux/iphone/bin"
-          if [ -e "$TB/armv7-apple-darwin11-ld" ]; then CC="$TB/armv7-apple-darwin11-clang"; LD="$TB/armv7-apple-darwin11-ld"
-          elif [ -e "$TB/arm64-apple-darwin14-ld" ]; then CC="$TB/arm64-apple-darwin14-clang"; LD="$TB/arm64-apple-darwin14-ld"
-          else CC="$TB/clang"; LD="$TB/ld"; fi
-          SDK_DIR=$(ls -d "$THEOS"/sdks/iPhoneOS*.sdk | sort -V | tail -1)
-          echo "SDK=$SDK_DIR"; echo "CC=$CC"; echo "LD=$LD"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CC=$(xcrun -sdk iphoneos -f clang)
+          echo "SDK=$SDK"; echo "CC=$CC"
           echo "== clang --version =="; "$CC" --version
-          echo "== ld 版本 =="; "$LD" -v 2>&1 | head -3 || true
-          echo "== libroot =="; ls "$THEOS/lib" | grep -E 'libroot' || true
-          echo 'int probe_x;' > /tmp/probe.c
+          echo "== ld 版本 =="; ld -v 2>&1 | head -3 || true
+          echo "== theos libroot =="; ls "$THEOS/lib" | grep -E 'libroot' || true
+          echo "== IS_NEW_ABI 预期 =="; echo "1 (macOS + Apple clang>=12 → 链接 \$THEOS/lib/libroot.a 的 v2 stub)"
+          printf 'int probe_x;\n' > "$RUNNER_TEMP/probe.c"
           for arch in arm64 arm64e; do
-            "$CC" -target "$arch-apple-ios15.0" -isysroot "$SDK_DIR" \
-              -c /tmp/probe.c -o "/tmp/probe-$arch.o"
-            echo "== probe $arch =="; file "/tmp/probe-$arch.o"
-            file "/tmp/probe-$arch.o" | grep -q Mach-O || { echo "FATAL: $arch probe 非 Mach-O"; exit 1; }
+            "$CC" -target "$arch-apple-ios15.0" -isysroot "$SDK" \
+              -c "$RUNNER_TEMP/probe.c" -o "$RUNNER_TEMP/probe-$arch.o"
+            echo "== probe $arch =="; file "$RUNNER_TEMP/probe-$arch.o"
+            file "$RUNNER_TEMP/probe-$arch.o" | grep -q Mach-O || { echo "FATAL: $arch probe 非 Mach-O"; exit 1; }
           done
-          # 结构化校验 arm64e 的 ABI: 新 ABI 的 cpusubtype 带 0x80000000 标记且 minos>=14.0
-          python3 - <<'PY'
-          import struct
-          d = open('/tmp/probe-arm64e.o','rb').read()
+          xcrun lipo -info "$RUNNER_TEMP/probe-arm64e.o"
+          # 结构化校验: v2 = cpusubtype 带 0x80000000 标记 且 minos>=14.0
+          python3 - "$RUNNER_TEMP/probe-arm64e.o" <<'PY'
+          import struct, sys
+          d = open(sys.argv[1], 'rb').read()
           sub = struct.unpack('<I', d[8:12])[0]
           ncmds = struct.unpack('<I', d[16:20])[0]
           o, minos = 32, None
@@ -196,8 +99,10 @@ jobs:
               if csz < 8: break
               o += csz
           print('arm64e cpusubtype=0x%08x minos=%s' % (sub, '%d.%d' % ((minos or 0) >> 16, ((minos or 0) >> 8) & 0xff)))
-          if not (sub & 0x80000000): raise SystemExit('FATAL: probe arm64e 是旧 ABI(v1)')
-          if minos is None or minos < (14 << 16): raise SystemExit('FATAL: probe arm64e minos<14.0')
+          if not (sub & 0x80000000):
+              raise SystemExit('FATAL: probe arm64e 是旧 ABI(v1), 本机 clang 不是 Apple clang')
+          if minos is None or minos < (14 << 16):
+              raise SystemExit('FATAL: probe arm64e minos<14.0')
           PY
 
       - name: 编译
@@ -205,43 +110,34 @@ jobs:
           SCHEME: ${{ matrix.scheme }}
         run: |
           set -o pipefail
-          TB="$THEOS/toolchain/linux/iphone/bin"
-          if [ -e "$TB/armv7-apple-darwin11-ld" ]; then CC="$TB/armv7-apple-darwin11-clang"; LD="$TB/armv7-apple-darwin11-ld"
-          elif [ -e "$TB/arm64-apple-darwin14-ld" ]; then CC="$TB/arm64-apple-darwin14-clang"; LD="$TB/arm64-apple-darwin14-ld"
-          else CC="$TB/clang"; LD="$TB/ld"; fi
           # theos 只有 rootless/roothide 两个显式 scheme; rootful = 不设置该变量。
           # 直接传 THEOS_PACKAGE_SCHEME=rootful 会被 common.mk 判为非法 scheme 而 Stop。
-          ABI=""
-          if [ "$SCHEME" != "rootful" ]; then
-            export THEOS_PACKAGE_SCHEME="$SCHEME"
-            # Linux 上 theos 会强制 IS_NEW_ABI=0(makefiles/instance/rules.mk L125-131),
-            # 即链接 $THEOS/lib/libroot_oldabi.a —— 它的 arm64e 对象是 v1(subtype 0x00000002,
-            # minos 7.0), 与 clang-16 产出的 v2 对象混链会被 ld64 判为
-            # "incompatible arm64e ABI compiler"。rootless 必须改成链接
-            # $THEOS/lib/libroot.a(v2: subtype 0x80000002, minos 14.0)。
-            ABI="IS_NEW_ABI=1"
-          fi
-          echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}] make_extra=[${ABI:-<none>}]"
-          echo "== 实际编译器 =="; "$CC" --version | head -3
-          echo "== 实际链接器 =="; "$LD" -v 2>&1 | head -2 || true
+          if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; fi
+          echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}]"
+          echo "== 编译器 =="; "$(xcrun -sdk iphoneos -f clang)" --version | head -3
+          echo "== 链接器 ld =="; ld -v 2>&1 | head -2 || true
           echo "ARCHS 预期: rootless/roothide=arm64 arm64e, rootful=arm64 (见 Makefile)"
           make clean
-          make -j"$(nproc)" ${ABI} 2>&1 | tee /tmp/build.log
+          make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "== 构建里出现的 -target =="
-          grep -o -E -- '-target [a-z0-9]+-apple-ios[0-9.]+' /tmp/build.log | sort -u || true
-          echo "== arm64e 编译次数 =="; grep -c -- '-arch arm64e' /tmp/build.log || true
-          if grep -q 'incompatible arm64e ABI' /tmp/build.log; then
+          grep -o -E -- '-target [a-z0-9]+-apple-ios[0-9.]+' "$RUNNER_TEMP/build.log" | sort -u || true
+          echo "== arm64e 编译次数 =="; grep -c -- '-arch arm64e' "$RUNNER_TEMP/build.log" || true
+          if [ "$SCHEME" != "rootful" ]; then
+            n=$(grep -c -- '-arch arm64e' "$RUNNER_TEMP/build.log" || true)
+            [ "${n:-0}" -gt 0 ] || { echo "FATAL: 构建未使用 arm64e 编译(ARCHS 未生效)"; exit 1; }
+          fi
+          if grep -q 'incompatible arm64e ABI' "$RUNNER_TEMP/build.log"; then
             echo "FATAL: 链接器报告 arm64e ABI 不兼容(工具链/libroot stub 不一致)"; exit 1
           fi
 
-      - name: 打包并校验
+      - name: 打包
         env:
           SCHEME: ${{ matrix.scheme }}
         run: |
-          ABI=""
-          if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; ABI="IS_NEW_ABI=1"; fi
+          set -e
+          if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; fi
           echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}]"
-          make package FINALPACKAGE=1 ${ABI}
+          make package FINALPACKAGE=1
           deb=$(ls -t packages/*.deb | head -1)
           echo "产物: $deb ($(du -h "$deb" | cut -f1))"
           dpkg-deb -I "$deb"
@@ -252,16 +148,13 @@ jobs:
           SCHEME: ${{ matrix.scheme }}
         run: |
           set -e
-          TB="$THEOS/toolchain/linux/iphone/bin"
-          if [ -x "$TB/armv7-apple-darwin11-lipo" ]; then LIPO="$TB/armv7-apple-darwin11-lipo"
-          elif [ -x "$TB/arm64-apple-darwin14-lipo" ]; then LIPO="$TB/arm64-apple-darwin14-lipo"
-          else LIPO=$(command -v lipo || echo lipo); fi
+          LIPO=$(xcrun -f lipo)
           deb=$(ls -t packages/*.deb | head -1)
-          rm -rf /tmp/chk && mkdir -p /tmp/chk
-          dpkg-deb -x "$deb" /tmp/chk
-          bundle=$(find /tmp/chk -type d -name "InsulationPrefs.bundle" | head -1)
+          rm -rf "$RUNNER_TEMP/chk" && mkdir -p "$RUNNER_TEMP/chk"
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/chk"
+          bundle=$(find "$RUNNER_TEMP/chk" -type d -name "InsulationPrefs.bundle" | head -1)
           exe="$bundle/InsulationPrefs"
-          dylib=$(find /tmp/chk -name "insulation.dylib" | head -1)
+          dylib=$(find "$RUNNER_TEMP/chk" -name "insulation.dylib" | head -1)
           echo "== 布局 =="; echo "bundle=$bundle"; echo "dylib=$dylib"
           # 断言方向: 目标进程(Preferences / thermalmonitord)都是 arm64e, 镜像必须含 arm64e 切片;
           # 纯 arm64 会被 dlopen_preflight 拒绝("have 'arm64', need 'arm64e'")。
@@ -319,7 +212,7 @@ jobs:
           PY
           fi
           echo "== 动态依赖 =="
-          grep -a -o "@rpath/[A-Za-z0-9_.]*" "$exe" | sort -u || true
+          strings "$exe" | grep -o "@rpath/[A-Za-z0-9_.]*" | sort -u || true
           echo "== Info.plist =="
           python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print({k:d.get(k) for k in ('CFBundleIdentifier','CFBundleExecutable','CFBundlePackageType','NSPrincipalClass')})" "$bundle/Info.plist"
           test -f "$bundle/Root.plist" || { echo "FATAL: bundle 缺 Root.plist"; exit 1; }
