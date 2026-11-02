@@ -6,8 +6,8 @@
  *   [UPSTREAM] readPreferenceValue/setPreferenceValue 直接读写
  *              /var/mobile/Library/Preferences/com.be-huge.insulation-prefs.plist,
  *              并按 specifier 的 PostNotification 发 Darwin 通知。
- *   [NEW]      chargingBatteryTempThreshold 输入校验: 非整数/越界 → 纠正到 [35,50] (默认 45),
- *              写回纠正后的值并刷新 cell 显示。
+ *   [NEW]      不支持充电状态/温度/阈值/回差判断: 「电池原生温控」只是一个布尔开关,
+ *              面板只负责把该 key 写入 plist 并发出 Darwin 通知, 语义全部由 Tweak.x 处理。
  */
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
@@ -35,12 +35,6 @@ static NSString *InsPrefsPath(void) {
     });
     return path;
 }
-
-/* [NEW] 阈值约束, 与 Tweak.x 保持一致 */
-#define kInsThresholdMin 35
-#define kInsThresholdMax 50
-#define kInsThresholdDefault 45
-#define kPrefChargingBatteryTempThreshold @"chargingBatteryTempThreshold"
 
 @interface IPRootListController : PSListController
 @end
@@ -80,40 +74,12 @@ static NSString *InsPrefsPath(void) {
 
     NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary new];
 
-    id finalValue = value;
-    BOOL corrected = NO;
-
-    /* [NEW] 「充电电池控温阈值」输入校验: 只接受 35~50 的整数, 越界/非法 → 纠正 */
-    if ([key isEqualToString:kPrefChargingBatteryTempThreshold]) {
-        NSString *raw = value ? [[value description] stringByTrimmingCharactersInSet:
-                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]] : nil;
-        NSInteger parsed = 0;
-        BOOL validInt = raw.length > 0;
-        /* [FIX] raw 为 nil 时不能构造 NSScanner (scannerWithString:nil 抛异常) */
-        if (validInt) {
-            NSScanner *scanner = [NSScanner scannerWithString:raw];
-            validInt = [scanner scanInteger:&parsed] && scanner.atEnd;
-        }
-        if (!validInt) {
-            parsed = kInsThresholdDefault;   /* 非整数输入 → 拒绝, 回落默认值 */
-            corrected = YES;
-        }
-        if (parsed < kInsThresholdMin) { parsed = kInsThresholdMin; corrected = YES; }  /* 越界 → clamp */
-        if (parsed > kInsThresholdMax) { parsed = kInsThresholdMax; corrected = YES; }
-        finalValue = @(parsed);
-    }
-
-    prefs[key] = finalValue;
+    prefs[key] = value;
     [prefs writeToFile:path atomically:YES];
-
-    /* [NEW] 输入被纠正时刷新 cell, 让界面上立即显示纠正后的值 */
-    if (corrected) {
-        [self reloadSpecifier:specifier animated:YES];
-    }
 
     /* [UPSTREAM] 按 cell 声明的 PostNotification 发 Darwin 通知
      * (原面板对 thermalPowerMode 发 com.be-huge.insulation-executePuppetEvent;
-     *  [NEW] 新 cell 声明 com.be-huge.insulation-batteryProtectChanged) */
+     *  [NEW] 「电池原生温控」开关声明 com.be-huge.insulation-batteryProtectChanged) */
     NSString *notification = specifier.properties[@"PostNotification"];
     if (notification.length > 0) {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),

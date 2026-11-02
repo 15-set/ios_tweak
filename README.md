@@ -1,6 +1,6 @@
 # Insulation-Mod
 
-Insulation（解除温控）0.0.18 的 Logos 源码级重建版，新增「充电电池温控保护」（key: `chragingBatteryThermalProtect` / `chargingBatteryTempThreshold`）。详见 [CHANGES.md](CHANGES.md)。
+Insulation（解除温控）0.0.18 的 Logos 源码级重建版，新增「电池原生温控」开关（key: `chragingBatteryThermalProtect`）：打开 = 电池温控永久交还系统原生；关闭 = 完全恢复插件原行为；CPU 永不降频不受该开关影响。详见 [CHANGES.md](CHANGES.md)。
 
 ## 为什么不在本机构建
 

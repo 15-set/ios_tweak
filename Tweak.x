@@ -1,6 +1,6 @@
 /*
  * =====================================================================================
- *  Insulation (解除温控) — Logos 重建版 + 「充电电池温控保护」改造
+ *  Insulation (解除温控) — Logos 重建版 + 「电池原生温控」开关
  * =====================================================================================
  *
  *  原插件: com.be-huge.insulation 0.0.18 (rootless, Swift/Orion 编译产物)
@@ -29,7 +29,6 @@
  */
 
 #import <Foundation/Foundation.h>
-#import <math.h>          /* [BUILD-FIX] isnan / NAN 显式引入, 不依赖 Foundation 间接包含 */
 #import <notify.h>
 #import <os/lock.h>
 #import <IOKit/IOKitLib.h>
@@ -91,15 +90,9 @@ static NSString *InsPrefsPath(void) {
 #define kPrefDisablePocketSunlight        @"thermalDisablePocketSunlightEnabled"
 #define kPrefSunlightLocked               @"thermalSunlightLockedEnabled"
 
-/* [NEW] 新增偏好 key —— 严格按需求原文命名 (chraging 为需求中的原拼写, 不改名) */
+/* [NEW] 开关 key (沿用历史 key 名, 不改名以免旧配置失效)
+ *        语义: YES = 电池温控永久交还系统原生 / NO = 完全恢复插件原行为 */
 #define kPrefChargingBatteryProtect       @"chragingBatteryThermalProtect"       // [NEW] 开关, 默认 NO
-#define kPrefChargingBatteryTempThreshold @"chargingBatteryTempThreshold"        // [NEW] 整数, 默认 45, 范围 35~50
-
-#define kInsThresholdMin 35   // [NEW]
-#define kInsThresholdMax 50   // [NEW]
-#define kInsThresholdDefault 45   // [NEW]
-#define kInsHysteresisDelta 2.0f  // [NEW] 回差: 温度回落 2℃ 后才恢复插件控制
-#define kInsTempPollInterval 5.0  // [NEW] 电池温度低频轮询周期(秒), 详见 CHANGES.md 耗电说明
 
 #pragma mark - 目标类声明 (来自上游 insulationC/include/Power_header 目录下的头文件, [UPSTREAM])
 
@@ -157,19 +150,7 @@ static NSString *InsPrefsPath(void) {
 - (void *)getConfigurationFor:(id)a3;
 @end
 
-#pragma mark - [NEW] IOKit / IOPowerSources 私有声明 (iOS 上无公开头文件, 符号长期稳定)
-
-/* [BUILD-FIX-B] SDK 自带 IOKit ps 头则优先使用; 不存在则回落手写 extern (符号长期稳定, ABI 一致) */
-#if __has_include(<IOKit/ps/IOPowerSources.h>)
-    #import <IOKit/ps/IOPowerSources.h>
-    #import <IOKit/ps/IOPSKeys.h>
-#else
-    typedef void (*IOPowerSourceCallbackType)(void *context);
-    extern CFRunLoopSourceRef IOPSNotificationCreateRunLoopSource(IOPowerSourceCallbackType callback, void *context);
-    extern CFTypeRef IOPSCopyPowerSourcesInfo(void);
-    extern CFArrayRef IOPSCopyPowerSourcesList(CFTypeRef blob);
-    extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps);
-#endif
+#pragma mark - [NEW] IOKit 私有声明 (仅用于电池传感器属性读取)
 
 /* [BUILD-FIX-D] IOHIDServiceClient 属性读取
  *   IOHIDServiceClientGetProperty 是 IOKit 的私有导出, 不在 SDK 的 IOKit.tbd (stub) 里,
@@ -190,13 +171,6 @@ static CFTypeRef InsIOHIDServiceClientGetProperty(IOHIDServiceClientRef service,
     });
     return pGet ? pGet(service, key) : NULL;
 }
-
-/* IOPS 字典键 (IOPSKeys.h 等价物) */
-#define kInsIOPSType           CFSTR("Type")
-#define kInsIOPSInternalBatt   CFSTR("InternalBattery")
-#define kInsIOPSIsCharging     CFSTR("IsCharging")
-#define kInsIOPSIsPresent      CFSTR("IsPresent")
-#define kInsIOPSTemperature    CFSTR("Temperature")
 
 #pragma mark - 全局状态
 
@@ -223,19 +197,16 @@ static unsigned gObservedComponentPowerGlobalMax = 0;
 
 static int gRuntimeStateToken = 0;   /* notify_set_state token, [EVIDENCE] com.be-huge.insulation.runtimeState */
 
-#pragma mark - [NEW] 充电电池温控保护 状态机
+#pragma mark - [NEW] 电池原生温控 开关状态
 
-/*
- * 滞回状态机 (施密特触发):
- *   PLUGIN_CONTROL  --(充电中 && 温度 >= 阈值)-->          NATIVE_RELEASED
- *   NATIVE_RELEASED --(温度 <= 阈值-2 || 拔线 || 开关关)-->  PLUGIN_CONTROL
- * 阈值附近抖动不会引起反复切换 (2℃ 回差)。
+/* [NEW]
+ *   gChargingProtectEnabled = YES → 电池温控事件永久放行给系统原生 (%orig)
+ *   gChargingProtectEnabled = NO  → 完全恢复插件原行为(继续吞掉电池温度事件)
+ *   gBatteryThermalReleased  —— 上面开关的直通副本, 供 hook 热路径读取
+ * 说明: 不区分充电状态、不比较温度、无阈值/回差; CPU 路径永不受这个开关影响。
  */
-static BOOL     gChargingProtectEnabled = NO;    /* [NEW] key: chragingBatteryThermalProtect */
-static NSInteger gBatteryTempThreshold = kInsThresholdDefault; /* [NEW] key: chargingBatteryTempThreshold */
-static BOOL     gIsCharging = NO;                /* [NEW] 由 IOPS 电源通知驱动, 非轮询 */
-static float    gLastBatteryTempC = NAN;         /* [NEW] 最近一次电池温度(℃), NaN = 读取失败 */
-static BOOL     gBatteryThermalReleased = NO;    /* [NEW] NO=插件接管(原行为) / YES=电池温控已交原生 */
+static BOOL gChargingProtectEnabled = NO;     /* [NEW] key: chragingBatteryThermalProtect, 默认 NO */
+static BOOL gBatteryThermalReleased  = NO;    /* NO=插件接管(原行为) / YES=电池温控已永久交还原生 */
 
 #pragma mark - 偏好读取
 
@@ -254,200 +225,20 @@ static void InsReloadPrefs(void) {
     gDisablePocketSunlight = [p[kPrefDisablePocketSunlight] boolValue];
     gSunlightLocked        = [p[kPrefSunlightLocked] boolValue];
 
-    /* [NEW] 开关默认关闭; 阈值读取时 clamp 到 [35,50], 缺省 45 */
-    gChargingProtectEnabled = [p[kPrefChargingBatteryProtect] boolValue];
-    id thObj = p[kPrefChargingBatteryTempThreshold];
-    NSInteger th = thObj ? [thObj integerValue] : kInsThresholdDefault;
-    if (th < kInsThresholdMin) th = kInsThresholdMin;
-    if (th > kInsThresholdMax) th = kInsThresholdMax;
-    gBatteryTempThreshold = th;
-
-    /* [NEW] 开关被关闭时立刻清滞回状态, 恢复插件接管 */
-    if (!gChargingProtectEnabled) gBatteryThermalReleased = NO;
+    /* [NEW] 开关默认关闭; 打开 = 电池温控永久交还原生, 关闭 = 恢复插件原行为。
+     *       直通赋值: 不做任何充电状态 / 温度 / 阈值 / 回差判断。 */
+    BOOL enabled = [p[kPrefChargingBatteryProtect] boolValue];
+    gChargingProtectEnabled = enabled;
+    BOOL wasReleased = gBatteryThermalReleased;
+    gBatteryThermalReleased = enabled;
 
     os_unfair_lock_unlock(&gLock);
-}
 
-#pragma mark - [NEW] 充电状态 (事件驱动: IOPS 电源变化通知, 不使用轮询猜测)
-
-static BOOL InsPollChargingState(void) {
-    BOOL charging = NO;
-    BOOL sawExternal = NO;
-
-    CFTypeRef blob = IOPSCopyPowerSourcesInfo();
-    if (!blob) return NO;
-    CFArrayRef list = blob ? IOPSCopyPowerSourcesList(blob) : NULL;
-    if (list) {
-        CFIndex n = CFArrayGetCount(list);
-        for (CFIndex i = 0; i < n; i++) {
-            CFTypeRef ps = CFArrayGetValueAtIndex(list, i);
-            CFDictionaryRef d = IOPSGetPowerSourceDescription(blob, ps);
-            if (!d) continue;
-            CFStringRef type = CFDictionaryGetValue(d, kInsIOPSType);
-            if (type && CFStringCompare(type, kInsIOPSInternalBatt, 0) == kCFCompareEqualTo) {
-                CFBooleanRef c = CFDictionaryGetValue(d, kInsIOPSIsCharging);
-                if (c && CFBooleanGetValue(c)) charging = YES;
-            } else {
-                CFBooleanRef present = CFDictionaryGetValue(d, kInsIOPSIsPresent);
-                if (present && CFBooleanGetValue(present)) sawExternal = YES;
-            }
-        }
-        CFRelease(list);
+    if (wasReleased != enabled) {
+        ILog(@"电池温控控制权: %@ | 开关=%@ | CPU 路径不受影响(永不放行)",
+             enabled ? @"已永久交还原生" : @"插件接管(原行为)",
+             enabled ? @"开" : @"关");
     }
-    CFRelease(blob);
-
-    /* 降级: 无 IsCharging 字段时, 有外部电源接入即视为充电 */
-    if (!charging && sawExternal) charging = YES;
-    return charging;
-}
-
-static void InsUpdateChargingState(NSString *reason);
-
-static void InsPowerSourceChanged(void *context) {
-    /* IOPS 通知回调 (runloop 线程): 电源插拔/状态变化时触发 */
-    InsUpdateChargingState(@"power source changed");
-}
-
-static void InsPowerSourceThreadMain(void) {
-    @autoreleasepool {
-        CFRunLoopSourceRef src = IOPSNotificationCreateRunLoopSource(InsPowerSourceChanged, NULL);
-        if (src) {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopDefaultMode);
-            /* [MEM-FIX] Create 规则: IOPSNotificationCreateRunLoopSource 返回 +1;
-             * CFRunLoopAddSource 会 retain, 此处归还持有的 +1, 否则泄漏一个 source。 */
-            CFRelease(src);
-            CFRunLoopRun();
-        }
-    }
-}
-
-#pragma mark - [NEW] 电池温度读取 (真实 IOKit 实现 + 安全降级)
-
-/*
- * 方案 A: AppleSmartBattery 的 "Temperature" 属性 (单位 0.01℃, 如 3050 = 30.5℃)
- * 方案 B (降级): IOPSCopyPowerSourcesInfo 内部电池源自带的 "Temperature" 键 (同单位)
- * 读取失败返回 NaN → 调用方一律按「未达阈值」处理 (绝不误触发放开), 并打日志。
- */
-static float InsReadBatteryTempCelsius(void) {
-    /* [BUILD-FIX] kIOMainPortDefault 仅 iOS 15+ SDK 提供, 而部署目标可为 12.2;
-     * kIOMasterPortDefault 在所有版本可用(已废弃但等价于 MACH_PORT_NULL), 保证跨 SDK 可编译 */
-    io_service_t svc = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleSmartBattery"));
-    if (svc != IO_OBJECT_NULL) {
-        CFTypeRef raw = IORegistryEntryCreateCFProperty(svc, CFSTR("Temperature"), kCFAllocatorDefault, 0);
-        IOObjectRelease(svc);
-        if (raw) {
-            float v = NAN;
-            if (CFGetTypeID(raw) == CFNumberGetTypeID()) {
-                v = [(NSNumber *)CFBridgingRelease(raw) floatValue] / 100.0f;
-            } else {
-                CFRelease(raw);
-            }
-            if (!isnan(v) && v > -40.0f && v < 120.0f) return v;  /* 合理范围校验 */
-        }
-    }
-
-    CFTypeRef blob = IOPSCopyPowerSourcesInfo();
-    if (blob) {
-        CFArrayRef list = IOPSCopyPowerSourcesList(blob);
-        float result = NAN;
-        if (list) {
-            CFIndex n = CFArrayGetCount(list);
-            for (CFIndex i = 0; i < n; i++) {
-                CFDictionaryRef d = IOPSGetPowerSourceDescription(blob, CFArrayGetValueAtIndex(list, i));
-                if (!d) continue;
-                CFStringRef type = CFDictionaryGetValue(d, kInsIOPSType);
-                if (type && CFStringCompare(type, kInsIOPSInternalBatt, 0) == kCFCompareEqualTo) {
-                    CFNumberRef t = CFDictionaryGetValue(d, kInsIOPSTemperature);
-                    if (t && CFGetTypeID(t) == CFNumberGetTypeID()) {
-                        float v = [(__bridge NSNumber *)t floatValue] / 100.0f;
-                        if (v > -40.0f && v < 120.0f) result = v;
-                    }
-                }
-            }
-            CFRelease(list);
-        }
-        CFRelease(blob);
-        return result;
-    }
-    return NAN;
-}
-
-#pragma mark - [NEW] 滞回状态机求值
-
-/*
- * 注意: 该函数只决定「电池温控这一路」的归属。
- * CPU/SOC 不降频逻辑不读这个状态, 任何模式下都保持原拦截, 绝不受影响。
- */
-static void InsEvaluateBatteryProtection(NSString *reason) {
-    os_unfair_lock_lock(&gLock);
-    BOOL enabled  = gChargingProtectEnabled;
-    BOOL charging = gIsCharging;
-    float tempC   = gLastBatteryTempC;
-    NSInteger th  = gBatteryTempThreshold;
-    BOOL was      = gBatteryThermalReleased;
-
-    BOOL want;
-    if (!enabled || !charging) {
-        want = NO;                       /* 开关关闭 / 未充电: 完全等同原版, 插件接管 */
-    } else if (isnan(tempC)) {
-        want = NO;                       /* 温度读取失败: 安全按未达阈值, 保持插件接管 */
-    } else if (was) {
-        want = (tempC > (float)th - kInsHysteresisDelta);  /* 已放开: 降到 阈值-2℃ 以下才收回 */
-    } else {
-        want = (tempC >= (float)th);                       /* 未放开: 达到阈值才放开 */
-    }
-    gBatteryThermalReleased = want;
-    os_unfair_lock_unlock(&gLock);
-
-    if (want != was) {
-        ILog(@"电池温控控制权切换: %@ -> %@ | 原因:%@ | 温度:%.1f℃ 阈值:%ld℃ 充电:%d | 时间:%@",
-             was ? @"已交原生" : @"插件接管",
-             want ? @"已交原生" : @"插件接管",
-             reason, tempC, (long)th, charging, [NSDate date]);
-    }
-}
-
-static void InsUpdateChargingState(NSString *reason) {
-    BOOL now = InsPollChargingState();
-    BOOL changed;
-    os_unfair_lock_lock(&gLock);
-    changed = (now != gIsCharging);
-    gIsCharging = now;
-    os_unfair_lock_unlock(&gLock);
-
-    if (changed) {
-        ILog(@"充电状态变化: %@ | 原因:%@ | 时间:%@", now ? @"充电中" : @"未充电", reason, [NSDate date]);
-    }
-    /* 拔线/停止充电 → InsEvaluateBatteryProtection 内 want=NO, 立刻清滞回恢复插件接管 */
-    InsEvaluateBatteryProtection(reason);
-}
-
-/* [NEW] 低频温度轮询: 每 5s 一次, 仅在 (开关开 && 充电中) 时真正读传感器。
- * 耗电考虑: 一次 IOKit 属性读取为微秒级; 5s 周期 + 2s leeway, 对功耗影响可忽略。
- * 充电状态本身不靠轮询 —— 由 IOPS 通知事件驱动 (见上)。 */
-static void InsTempPollTick(void) {
-    os_unfair_lock_lock(&gLock);
-    BOOL need = gChargingProtectEnabled && gIsCharging;
-    os_unfair_lock_unlock(&gLock);
-    if (!need) return;
-
-    float t = InsReadBatteryTempCelsius();
-    os_unfair_lock_lock(&gLock);
-    gLastBatteryTempC = t;
-    NSInteger th = gBatteryTempThreshold;
-    BOOL released = gBatteryThermalReleased;
-    os_unfair_lock_unlock(&gLock);
-
-    if (isnan(t)) {
-        static BOOL sLoggedReadFail = NO;
-        if (!sLoggedReadFail) {
-            ILog(@"电池温度读取失败, 按未达阈值处理 (插件保持接管)");
-            sLoggedReadFail = YES;
-        }
-    } else {
-        ILog(@"电池温度 %.1f℃ | 阈值 %ld℃ | 控制权:%@ | 充电中", t, (long)th, released ? @"已交原生" : @"插件接管");
-    }
-    InsEvaluateBatteryProtection(@"temp poll");
 }
 
 #pragma mark - [NEW] 电池温度传感器识别 (用于只放开电池这一路)
@@ -665,9 +456,9 @@ static void InsApplyPowerMode(void) {
  * ★★★ 电池温控的唯一放行点 ★★★
  * 原插件在此吞掉所有 HID 温度传感器事件(空实现, [UPSTREAM] 逐行一致),
  * 因此 SOC(CPU 温控输入) 与电池温度事件在同一处被拦截。
- * [NEW] 仅当 (开关开 && 充电中 && 温度≥阈值 && 滞回状态=已交原生) 且该事件
- *       来自电池传感器时, 调用 %orig 放行 —— 即把电池温控交还苹果原生策略。
- *       其余情况与原版完全相同(吞掉)。CPU 相关传感器事件永远不放行。
+ * [NEW] 开关打开(gBatteryThermalReleased=YES) 时: 仅当该事件来自电池传感器,
+ *       调用 %orig 放行 —— 电池温控永久交还苹果原生策略, 不看充电状态/温度。
+ *       开关关闭时恒为 NO → 与原版逐字等价; CPU 相关事件任何情况下都不放行。
  */
 %hook HidSensors
 
@@ -899,8 +690,9 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
         InsApplyPowerMode();
         InsApplyAdvancedSwitches();
     }
-    /* [NEW] 电池保护参数变化: 阈值/开关立刻生效并重新求值滞回状态 */
-    InsEvaluateBatteryProtection(@"prefs changed");
+    /* [NEW] 「电池原生温控」开关: InsReloadPrefs 已把开关状态直通到
+     *       gBatteryThermalReleased(不做充电/温度判断), 此处无需再求值;
+     *       控制权变化日志已在 InsReloadPrefs 内输出。 */
 }
 
 %ctor {
@@ -917,22 +709,13 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
         CFNotificationCenterAddObserver(center, NULL, InsOnPrefsChanged,
                                         CFSTR(kInsNotifBatteryChanged), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 
-        /* [NEW] 充电插拔: IOPS 电源变化通知, 独立 runloop 线程, 事件驱动 */
-        [NSThread detachNewThreadWithBlock:^{ InsPowerSourceThreadMain(); }];
-
-        /* [NEW] 电池温度低频轮询定时器 (5s, leeway 2s) */
-        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
-        dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kInsTempPollInterval * NSEC_PER_SEC)),
-                                  (uint64_t)(kInsTempPollInterval * NSEC_PER_SEC), (uint64_t)(2 * NSEC_PER_SEC));
-        dispatch_source_set_event_handler(timer, ^{ InsTempPollTick(); });
-        dispatch_resume(timer);
-
         %init;
 
         os_unfair_lock_lock(&gLock);
-        ILog(@"insulation loaded (Logos 重建版 + 充电电池温控保护) | mode=%ld protect=%d threshold=%ld℃",
-             (long)gPowerMode, gChargingProtectEnabled, (long)gBatteryTempThreshold);
+        ILog(@"insulation loaded (Logos 重建版 + 电池原生温控开关) | mode=%ld | 开关=%@ | 电池温控控制权:%@ | CPU 路径不受影响(永不放行)",
+             (long)gPowerMode,
+             gChargingProtectEnabled ? @"开" : @"关",
+             gBatteryThermalReleased ? @"已永久交还原生" : @"插件接管(原行为)");
         os_unfair_lock_unlock(&gLock);
     }
 }

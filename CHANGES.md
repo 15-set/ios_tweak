@@ -1,4 +1,4 @@
-# Insulation 改造说明（充电电池温控保护）
+# Insulation 改造说明（电池原生温控开关）
 
 基于 `insulation-0.0.18-iphoneos-arm64.deb`（com.be-huge.insulation）逆向分析 + 源码重建。
 
@@ -68,44 +68,29 @@ defaults 域：`com.be-huge.insulation-prefs`，文件 `…/Preferences/com.be-h
 
 ## 2. 新增设置项
 
-| key | 类型 | 默认 | 约束 |
+| key | 类型 | 默认 | 语义 |
 |---|---|---|---|
-| `chragingBatteryThermalProtect` | bool | NO | 开关（按需求原文命名，含原拼写 chraging） |
-| `chargingBatteryTempThreshold` | int | 45 | 单位 ℃，范围 35~50；面板端越界/非法输入纠正（clamp/回落 45）并刷新 cell；Tweak 端读取时同样 clamp |
+| `chragingBatteryThermalProtect` | bool | NO | 打开 = 电池温控永久交还系统原生（不看充电状态/温度，无阈值无回差）；关闭 = 完全恢复插件原行为 |
 
-新 cell 均带 `PostNotification = com.be-huge.insulation-batteryProtectChanged`，Tweak 监听后即时生效。
+新 cell 带 `PostNotification = com.be-huge.insulation-batteryProtectChanged`，Tweak 监听后即时生效。
 
-## 3. 状态机（滞回 / 施密特触发）
+## 3. 控制权模型（无状态机）
 
 ```
-                        enabled && charging && temp >= threshold
-  ┌────────────────┐  ─────────────────────────────────────────▶  ┌─────────────────┐
-  │ PLUGIN_CONTROL │                                              │ NATIVE_RELEASED │
-  │ (插件接管,原版行为)│ ◀─────────────────────────────────────────  │ (电池温控交原生)   │
-  └────────────────┘   !enabled || !charging || temp <= th-2℃      └─────────────────┘
+开关 = NO  →  插件接管：HidSensors 吞掉全部温度事件（与原版逐字等价）
+开关 = YES →  已永久交还原生：仅电池传感器事件 %orig 放行；CPU/SOC 事件仍吞掉
 ```
 
-伪代码（`InsEvaluateBatteryProtection`，与 Tweak.x 一致）：
-
-```text
-if (!enabled || !charging)      want = PLUGIN_CONTROL      # 含拔线,立即清滞回
-else if (temp 读取失败)          want = PLUGIN_CONTROL      # 安全降级,绝不误放开
-else if (当前 == NATIVE_RELEASED) want = (temp > threshold - 2)
-else                              want = (temp >= threshold)
-状态变化时打日志(原因+时间戳+温度+阈值)
-```
-
-- **充电状态**：IOKit `IOPSNotificationCreateRunLoopSource` 事件驱动（独立 runloop 线程），插拔即时触发，非轮询。
-- **电池温度**：`AppleSmartBattery` 的 `Temperature` 属性（0.01℃）为主，`IOPSCopyPowerSourcesInfo` 的 Temperature 为降级；均失败 → NaN → 按未达阈值处理并打日志。仅在「开关开 && 充电中」时轮询，周期 5s（leeway 2s），单次 IOKit 属性读取为微秒级，耗电可忽略。
-- **生效点**：`HidSensors handleTemperatureEvent:service:` —— 仅当状态为 NATIVE_RELEASED 且事件来自电池传感器时 `%orig` 放行；其余与原版完全一致（吞掉）。开关关闭时该 hook 多出的逻辑只有一次原子状态读取，行为与原版逐字节等价。
+- `InsReloadPrefs` 将开关直接同步到 `gBatteryThermalReleased`（无充电判断、无温度读取、无阈值/回差、无轮询）。
+- **生效点**：`HidSensors handleTemperatureEvent:service:` —— 开关打开且事件来自电池传感器时 `%orig` 放行；其余与原版完全一致（吞掉）。
+- **CPU 不降频**：MitigationController/ComponentControl/CPMSHelper/NSDictionary 各 hook 与该开关完全无关，任何开关状态下都保持原有拦截。
 
 ## 4. 场景推演
 
 | 场景 | CPU 是否降频 | 电池温控由谁接管 | 说明 |
 |---|---|---|---|
-| ① 开关开、**未充电**、电池 48℃ ≥ 阈值 45 | **不降频**（fullPower 拦截链全保留） | 插件（=屏蔽，同原版） | 未充电不进入充电规则，HidSensors 全吞 |
-| ② 开关开、**充电中**、温度升到 45℃ → 46℃ | **不降频** | **苹果原生**（电池传感器事件 %orig 放行，thermalmonitord 原生电池热逻辑生效；另有 powerd/电量计硬路径兜底） | 状态 PLUGIN_CONTROL→NATIVE_RELEASED，日志记录切换 |
-| ③ ②之后温度回落到 **43℃**（=阈值-2） | **不降频** | 回到插件接管 | 43 ≤ 45-2 触发滞回退出；若只落到 44℃（>43℃）则保持原生接管，阈值附近不抖动 |
+| ① 开关关闭（默认） | 取决于 CPU 模式（与 0.0.18 完全一致） | 插件（吞掉电池温度事件，同原版） | 与 0.0.18 逐字等价 |
+| ② 开关打开（任意充电状态、任意温度） | 取决于 CPU 模式，**电池开关不影响 CPU 路径** | **苹果原生**（电池传感器事件 `%orig` 放行；另有 powerd/电量计硬路径兜底） | 无温度/充电判断，持久生效，重启后仍按 plist 值生效 |
 
 ## 5. 编译与安装
 

@@ -28,6 +28,13 @@
 			<string>com.be-huge.insulation-prefs</string>
 			<key>cell</key>
 			<string>PSLinkListCell</string>
+			<!-- [FIX-A] 0.0.18 的该 cell 没有 detail; 在 iOS 15/16 上点击会被推到
+			     一个没有任何选项数据源的空白控制器(即用户看到的"空白页")。
+			     补上 detail=PSListItemsController 即恢复原版交互:
+			     点击 → 进入选项列表页, 选项来自下方 validValues/validTitles。
+			     选项文案/数量/默认值/key/通知均未改动。 -->
+			<key>detail</key>
+			<string>PSListItemsController</string>
 			<key>label</key>
 			<string>CPU 模式</string>
 			<key>key</key>
@@ -98,46 +105,26 @@
 			<string>thermalSunlightLockedEnabled</string>
 		</dict>
 
-		<!-- ===== [NEW] 充电电池温控保护 ===== -->
+		<!-- ===== [NEW] 电池原生温控 (单一开关, 无阈值/无回差) ===== -->
 		<dict>
 			<key>label</key>
-			<string>充电电池温控保护</string>
+			<string>电池</string>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>充电时监测电池温度，达到设定温度后交由原生电池温控接管保护；仅释放电池温控，CPU 不降频功能不受影响；温度回落 2℃ 后恢复插件控制。</string>
+			<string>打开：电池温控永久交还系统原生策略（不区分充电状态、不比较温度、无阈值与回差）。关闭：完全恢复插件原本行为。无论开关如何设置，CPU 均不会被温控降频。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>label</key>
-			<string>充电电池温控保护</string>
+			<string>电池原生温控</string>
 			<key>default</key>
 			<false/>
 			<key>defaults</key>
 			<string>com.be-huge.insulation-prefs</string>
 			<key>key</key>
 			<string>chragingBatteryThermalProtect</string>
-			<key>PostNotification</key>
-			<string>com.be-huge.insulation-batteryProtectChanged</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSEditTextCell</string>
-			<key>label</key>
-			<string>充电电池控温阈值 (℃)</string>
-			<key>default</key>
-			<string>45</string>
-			<key>defaults</key>
-			<string>com.be-huge.insulation-prefs</string>
-			<key>key</key>
-			<string>chargingBatteryTempThreshold</string>
-			<key>keyboard</key>
-			<string>numbers</string>
-			<key>isNumeric</key>
-			<string>true</string>
-			<key>placeholder</key>
-			<string>35~50 的整数，默认 45</string>
 			<key>PostNotification</key>
 			<string>com.be-huge.insulation-batteryProtectChanged</string>
 		</dict>
