@@ -22,8 +22,13 @@ jobs:
 
       - name: 安装构建依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -e
+          # Azure apt 源偶发 403/Hash Sum mismatch 是 Actions 高频瞬态失败, update 加重试
+          for i in 1 2 3; do
+            sudo apt-get update -y && break
+            echo "apt-get update 第 $i 次失败, 10s 后重试"; sleep 10
+          done
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git make perl clang ldid dpkg fakeroot \
             libplist-utils libssl-dev zlib1g-dev zstd curl unzip ca-certificates
           # libplist-utils 提供 plistutil: theos 需要它把旧式 ASCII 格式的
