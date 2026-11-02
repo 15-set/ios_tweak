@@ -90,7 +90,7 @@ static NSString *InsPrefsPath(void) {
     }
 
     prefs[key] = finalValue;
-    [prefs writeToFile:kInsPrefsPath atomically:YES];
+    [prefs writeToFile:InsPrefsPath() atomically:YES];
 
     /* [NEW] 输入被纠正时刷新 cell, 让界面上立即显示纠正后的值 */
     if (corrected) {

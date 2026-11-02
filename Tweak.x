@@ -33,7 +33,16 @@
 #import <notify.h>
 #import <os/lock.h>
 #import <IOKit/IOKitLib.h>
-#import <SystemConfiguration/SCPreferences.h>
+#import <dlfcn.h>          /* [BUILD-FIX-C] dlsym: SCPreferences* 在 iOS SDK 标记 unavailable, 改运行时取符号 */
+
+/* [BUILD-FIX-A] 私有类前向声明: 与下方 @interface 并存合法, 双保险保证
+ * 全局指针及 Logos 生成代码处的类型可见性 */
+@class CommonProduct;
+@class MitigationController;
+@class ComponentControl;
+@class CPMSHelper;
+@class HidSensors;
+@class ThermalManager;
 
 /*
  * [BUILD-FIX] rootless 路径换算
@@ -92,7 +101,7 @@ static NSString *InsPrefsPath(void) {
 #define kInsHysteresisDelta 2.0f  // [NEW] 回差: 温度回落 2℃ 后才恢复插件控制
 #define kInsTempPollInterval 5.0  // [NEW] 电池温度低频轮询周期(秒), 详见 CHANGES.md 耗电说明
 
-#pragma mark - 目标类声明 (来自上游 insulationC/include/Power_header/*.h, [UPSTREAM])
+#pragma mark - 目标类声明 (来自上游 insulationC/include/Power_header 目录下的头文件, [UPSTREAM])
 
 @interface CommonProduct : NSObject
 - (int)gasGaugeBatteryTemperature;
@@ -150,11 +159,17 @@ static NSString *InsPrefsPath(void) {
 
 #pragma mark - [NEW] IOKit / IOPowerSources 私有声明 (iOS 上无公开头文件, 符号长期稳定)
 
-typedef void (*IOPowerSourceCallbackType)(void *context);
-extern CFRunLoopSourceRef IOPSNotificationCreateRunLoopSource(IOPowerSourceCallbackType callback, void *context);
-extern CFTypeRef IOPSCopyPowerSourcesInfo(void);
-extern CFArrayRef IOPSCopyPowerSourcesList(CFTypeRef blob);
-extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps);
+/* [BUILD-FIX-B] SDK 自带 IOKit ps 头则优先使用; 不存在则回落手写 extern (符号长期稳定, ABI 一致) */
+#if __has_include(<IOKit/ps/IOPowerSources.h>)
+    #import <IOKit/ps/IOPowerSources.h>
+    #import <IOKit/ps/IOPSKeys.h>
+#else
+    typedef void (*IOPowerSourceCallbackType)(void *context);
+    extern CFRunLoopSourceRef IOPSNotificationCreateRunLoopSource(IOPowerSourceCallbackType callback, void *context);
+    extern CFTypeRef IOPSCopyPowerSourcesInfo(void);
+    extern CFArrayRef IOPSCopyPowerSourcesList(CFTypeRef blob);
+    extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps);
+#endif
 
 /* IOHIDServiceClient 属性读取 (IOKit 导出, thermalmonitord 进程内可用) */
 typedef const struct __IOHIDServiceClient *IOHIDServiceClientRef;
@@ -481,13 +496,48 @@ static BOOL InsIsBatteryThermalService(id service) {
  * 导出函数: insulationSetOSNotifEnabled / insulationSetHIPEnabled / insulationSetSunlightOverride ...
  * [INFERRED] 具体键值映射按日志字符串语义重建。
  */
+/* [BUILD-FIX-C] SCPreferencesCreate/SetValue/RemoveValue/CommitChanges/ApplyChanges 在 iOS SDK
+ * 标记 API_UNAVAILABLE(ios), 直接调用即编译错误; 运行时符号仍由 SystemConfiguration.framework
+ * 导出 → 改 dlsym 解析 + 自有不透明类型。写入目标 (域 "insulation" 的 OSThermalStatus.plist)
+ * 与调用序列 (create → set/remove → commit → apply → release) 与原实现完全一致;
+ * 符号缺失 → 打日志并安全跳过 (等价于原 prefs==NULL 早退路径的扩展)。 */
+typedef const struct InsSCPreferencesOpaque *InsSCPreferencesRef;
+typedef InsSCPreferencesRef (*InsSCCreate_t)(CFAllocatorRef, CFStringRef, CFStringRef);
+typedef Boolean (*InsSCSet_t)(InsSCPreferencesRef, CFStringRef, CFTypeRef);
+typedef Boolean (*InsSCRemove_t)(InsSCPreferencesRef, CFStringRef);
+typedef Boolean (*InsSCCommit_t)(InsSCPreferencesRef);
+typedef Boolean (*InsSCApply_t)(InsSCPreferencesRef);
+
 static void InsSCSetValue(CFStringRef key, CFTypeRef value) {
-    SCPreferencesRef prefs = SCPreferencesCreate(kCFAllocatorDefault, CFSTR("insulation"), CFSTR("OSThermalStatus.plist"));
-    if (!prefs) return;
-    if (value) SCPreferencesSetValue(prefs, key, value);
-    else       SCPreferencesRemoveValue(prefs, key);
-    SCPreferencesCommitChanges(prefs);
-    SCPreferencesApplyChanges(prefs);
+    static InsSCCreate_t pCreate;
+    static InsSCSet_t    pSet;
+    static InsSCRemove_t pRemove;
+    static InsSCCommit_t pCommit;
+    static InsSCApply_t  pApply;
+    static BOOL          sResolved = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        /* 确保 SystemConfiguration.framework 已加载 (本 dylib 已链接它, 此为双保险) */
+        dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY | RTLD_GLOBAL);
+        pCreate = (InsSCCreate_t)dlsym(RTLD_DEFAULT, "SCPreferencesCreate");
+        pSet    = (InsSCSet_t)dlsym(RTLD_DEFAULT, "SCPreferencesSetValue");
+        pRemove = (InsSCRemove_t)dlsym(RTLD_DEFAULT, "SCPreferencesRemoveValue");
+        pCommit = (InsSCCommit_t)dlsym(RTLD_DEFAULT, "SCPreferencesCommitChanges");
+        pApply  = (InsSCApply_t)dlsym(RTLD_DEFAULT, "SCPreferencesApplyChanges");
+        sResolved = (pCreate && pSet && pRemove && pCommit && pApply);
+        if (!sResolved) ILog(@"SCPreferences 符号解析失败 (dlsym), OSThermalStatus.plist 写入将被跳过");
+    });
+    if (!sResolved) return;
+
+    InsSCPreferencesRef prefs = pCreate(kCFAllocatorDefault, CFSTR("insulation"), CFSTR("OSThermalStatus.plist"));
+    if (!prefs) {
+        ILog(@"SCPreferencesCreate 返回 NULL, 跳过 key=%@", key);
+        return;
+    }
+    if (value) pSet(prefs, key, value);
+    else       pRemove(prefs, key);
+    pCommit(prefs);
+    pApply(prefs);
     CFRelease(prefs);
 }
 
