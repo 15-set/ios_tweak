@@ -36,8 +36,11 @@
 #import <signal.h>         /* [NEW] kill(getpid(), SIGKILL) 重启 thermalmonitord */
 #import <unistd.h>         /* [NEW] getpid */
 #import <sys/stat.h>       /* [NEW] chmod: 调试日志可被 mobile 用户 tail */
-#import <stdio.h>          /* [NEW] fopen/fputs: 落盘诊断 */
+#import <stdio.h>          /* [NEW] snprintf: 落盘诊断 */
 #import <stdarg.h>         /* [NEW] va_list */
+#import <fcntl.h>          /* [NEW] open/O_APPEND: 多路径探测 */
+#import <errno.h>          /* [NEW] errno: 记录失败原因 */
+#import <string.h>         /* [NEW] strlen */
 
 /* [BUILD-FIX-A] 私有类前向声明: 与下方 @interface 并存合法, 双保险保证
  * 全局指针及 Logos 生成代码处的类型可见性 */
@@ -82,8 +85,11 @@ static NSString *InsPrefsPath(void) {
 #define ILog(fmt, ...) NSLog(@"[Insulation] " fmt, ##__VA_ARGS__)
 
 /* [NEW] 不依赖 `log stream` 的落盘诊断: 直接追加到固定文件, 手机端 `tail` 即可看。
- *   路径固定为真实用户域, 不随 jbroot 变化; root 进程写, 权限调成 0644 供 mobile 读取。 */
-#define kInsDebugLogPath "/var/mobile/Library/Preferences/insulation-debug.log"
+ *   [FIX] 之前只试 /var/mobile/Library/Preferences 与 /var/tmp 两条路径且失败静默;
+ *         thermalmonitord 大概率被 sandbox 限制(或 uid/HOME 不是 mobile), 导致两个路径都 fopen 失败。
+ *         现在: 多候选 open() 探测 + 记录每条候选的 errno + 选定路径写日志 + NSLog 兜底。 */
+#define kInsDebugLogMaxPath 512
+static char gInsDebugLogPath[kInsDebugLogMaxPath];
 
 static void InsDebugLog(NSString *fmt, ...) {
     va_list ap;
@@ -91,18 +97,59 @@ static void InsDebugLog(NSString *fmt, ...) {
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
 
-    NSString *entry = [NSString stringWithFormat:@"[%@ pid=%d] %@\n", [NSDate date], getpid(), line];
+    NSString *entry = [NSString stringWithFormat:@"[%@ pid=%d uid=%d] %@\n",
+                       [NSDate date], getpid(), getuid(), line];
 
-    /* thermalmonitord 受 sandbox 限制, 首选失败时回退 /var/tmp (两者都对 mobile 可读) */
-    const char *candidates[] = { kInsDebugLogPath, "/var/tmp/insulation-debug.log" };
-    for (int i = 0; i < 2; i++) {
-        FILE *f = fopen(candidates[i], "a");
-        if (!f) continue;
-        fputs(entry.UTF8String, f);
-        fclose(f);
-        chmod(candidates[i], 0644);
-        return;
+    if (gInsDebugLogPath[0] == '\0') {
+        /* 覆盖: 真实用户域 / jbroot 镜像 / 插件目录 / /tmp / /var/tmp, 最后用 HOME */
+        const char *fixedCands[] = {
+            "/var/mobile/Library/Preferences/insulation-debug.log",
+            "/var/jb/var/mobile/Library/Preferences/insulation-debug.log",
+            "/var/jb/Library/MobileSubstrate/DynamicLibraries/insulation-debug.log",
+            "/tmp/insulation-debug.log",
+            "/var/tmp/insulation-debug.log",
+        };
+        int errs[5] = {0};
+        for (int i = 0; i < 5; i++) {
+            int fd = open(fixedCands[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd >= 0) {
+                close(fd);
+                chmod(fixedCands[i], 0644);
+                snprintf(gInsDebugLogPath, sizeof(gInsDebugLogPath), "%s", fixedCands[i]);
+                NSLog(@"[Insulation][debuglog] 选用路径: %s", fixedCands[i]);
+                break;
+            }
+            errs[i] = errno;
+        }
+        if (gInsDebugLogPath[0] == '\0') {
+            NSString *homePath = [NSHomeDirectory() stringByAppendingPathComponent:@"insulation-debug.log"];
+            int fd = open(homePath.UTF8String, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd >= 0) {
+                close(fd);
+                chmod(homePath.UTF8String, 0644);
+                snprintf(gInsDebugLogPath, sizeof(gInsDebugLogPath), "%s", homePath.UTF8String);
+                NSLog(@"[Insulation][debuglog] 选用路径: %@", homePath);
+            } else {
+                NSLog(@"[Insulation][debuglog] 全部路径失败 uid=%d HOME=%@ errno=[%d,%d,%d,%d,%d,%d]",
+                      getuid(), NSHomeDirectory(), errs[0], errs[1], errs[2], errs[3], errs[4], errno);
+            }
+        }
     }
+
+    if (gInsDebugLogPath[0] != '\0') {
+        int fd = open(gInsDebugLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            const char *s = entry.UTF8String;
+            (void)write(fd, s, strlen(s));
+            close(fd);
+        } else {
+            NSLog(@"[Insulation][debuglog] 追加失败 path=%s errno=%d", gInsDebugLogPath, errno);
+            gInsDebugLogPath[0] = '\0';   /* 下次重新探测 */
+        }
+    }
+
+    /* 统一日志兜底: 即使落盘失败, Console/log stream 也能看到 */
+    NSLog(@"[Insulation] %@", line);
 }
 
 /* Darwin 通知名 (与原 deb 二进制字符串一致) */
@@ -417,7 +464,12 @@ static void InsApplyAdvancedSwitches(void) {
  *   "insulation: full power mode" / "insulation disables CPU mitigations with full target %d"
  *   "thermalPowerMode fullPower -> thermal mitigations disabled (%d)"
  *   "thermalPowerMode native/lowPower -> thermal mitigations reset (%d)"
- * [INFERRED] 具体调用序列按语义重建; 通过 hook 中捕获的 mitigationControllerObject 下发。
+ * [EVIDENCE] 反汇编 (arm64 slice, applyPowerMode = 0xbe04..0xc2d4):
+ *   lowPower 分支 0xc020..0xc0e4: setPowerSaveActive:YES → setCPULevel:2 → updateCPU
+ *                                  → setPowerSaveActive:YES → setCPULevel:2
+ *   日志 "insulation: low power mode at CPU level %d" 的实参为 w24=2 (0xc0d4 处 mov w24,#2 的来源)。
+ *   lowPower 分支不调用 setCPMSMitigationsEnabled: / setCPUPowerCeiling: / setCPUPowerZoneTarget:。
+ *   CPMS 缓解开关只出现在启动 initForFastLoop 路径 (0x12094: w2=1)。
  */
 static void InsApplyPowerMode(void) {
     os_unfair_lock_lock(&gLock);
@@ -440,13 +492,15 @@ static void InsApplyPowerMode(void) {
             ILog(@"thermalPowerMode fullPower -> thermal mitigations disabled (%d)", 0);
             break;
         case InsPowerModeLowPower:
-            [mc setCPMSMitigationsEnabled:YES];  /* [INFERRED] 恢复缓解, 模拟低电 */
-            [mc setPowerSaveActive:YES];         /* [INFERRED] 模拟低电量模式 */
-            /* [INFERRED] 原版日志 "low power mode at CPU level %d" 表明 lowPower 会下发
-             * 一个非 0 的 CPU mitigation level; 取最小档 1 (setCPULevel: 的钳制见 Hook 4)。
-             * 若真机仍测不到降频, 只需调这里的目标档位, 不改交互链路。 */
-            [mc setCPULevel:1];
-            ILog(@"insulation: low power mode at CPU level %d", 1);
+            /* [EVIDENCE] 与 0xbe04 的 lowPower 分支一致: 档位是 2, 不是 1。
+             * 顺序: PS:YES → CPULevel:2 → updateCPU → PS:YES → CPULevel:2 */
+            [mc setCPMSMitigationsEnabled:YES];  /* [EVIDENCE] 启动路径 0x12094 传 w2=1; 切换路径不下发 */
+            [mc setPowerSaveActive:YES];         /* [EVIDENCE] 0xc028 / 0xc060, w2=1 */
+            [mc setCPULevel:2];                  /* [EVIDENCE] 0xc03c, w24=2 */
+            [mc updateCPU];                      /* [EVIDENCE] 0xc050 */
+            [mc setPowerSaveActive:YES];         /* [EVIDENCE] 0xc060, w2=1 */
+            [mc setCPULevel:2];                  /* [EVIDENCE] 0xc0d4, w24=2 */
+            ILog(@"insulation: low power mode at CPU level %d", 2);
             ILog(@"thermalPowerMode native/lowPower -> thermal mitigations reset (%d)", 0);
             break;
         case InsPowerModeOff:
@@ -636,9 +690,12 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
         %orig(0);        /* 强制 CPU level 0 = 不降频 */
         return;
     }
-    /* [INFERRED] lowPower: 持续钳制在 level 1(模拟低电), 防止原生后续把 level 改回 0 */
-    if (mode == InsPowerModeLowPower && level < 1) {
-        %orig(1);
+    /* [EVIDENCE] 0xb760..0xb964 (setCPULevel hook): lowPower 下目标恒为 2;
+     * 非 2 的调用都会被改成 2, 并打印 "insulation cpu level lock %d -> %d"。
+     * [FIX] 原实现钳制到 1 是错的 —— 原版 lowPower 档位是 2。 */
+    if (mode == InsPowerModeLowPower && level != 2) {
+        ILog(@"insulation cpu level lock %d -> %d", level, 2);
+        %orig(2);
         return;
     }
     %orig;
