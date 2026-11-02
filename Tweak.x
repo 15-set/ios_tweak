@@ -34,13 +34,8 @@
 #import <IOKit/IOKitLib.h>
 #import <dlfcn.h>          /* [BUILD-FIX-C] dlsym: SCPreferences* 在 iOS SDK 标记 unavailable, 改运行时取符号 */
 /* [FIX][SAFETY] 不再自杀重启 thermalmonitord; 保留 unistd.h 供 getpid/getuid/geteuid */
-#import <unistd.h>         /* [NEW] getpid */
-#import <sys/stat.h>       /* [NEW] chmod: 调试日志可被 mobile 用户 tail */
-#import <stdio.h>          /* [NEW] snprintf: 落盘诊断 */
-#import <stdarg.h>         /* [NEW] va_list */
-#import <fcntl.h>          /* [NEW] open/O_APPEND: 多路径探测 */
-#import <errno.h>          /* [NEW] errno: 记录失败原因 */
-#import <string.h>         /* [NEW] strlen */
+#import <unistd.h>         /* [NEW] getpid/getuid/geteuid */
+#import <stdarg.h>         /* [MODIFIED] va_list — InsDebugLog 改用 NSLog */
 
 /* [BUILD-FIX-A] 私有类前向声明: 与下方 @interface 并存合法, 双保险保证
  * 全局指针及 Logos 生成代码处的类型可见性 */
@@ -84,96 +79,16 @@ static NSString *InsPrefsPath(void) {
 
 #define ILog(fmt, ...) NSLog(@"[Insulation] " fmt, ##__VA_ARGS__)
 
-/* [NEW] 不依赖 `log stream` 的落盘诊断: 直接追加到固定文件, 手机端 `tail` 即可看。
- *   [FIX] 之前只试 /var/mobile/Library/Preferences 与 /var/tmp 两条路径且失败静默;
- *         thermalmonitord 大概率被 sandbox 限制(或 uid/HOME 不是 mobile), 导致两个路径都 fopen 失败。
- *         现在: 多候选 open() 探测 + 记录每条候选的 errno + 选定路径写日志 + NSLog 兜底。 */
-#define kInsDebugLogMaxPath 512
-static char gInsDebugLogPath[kInsDebugLogMaxPath];
-
-static NSString *InsErrName(int e) {
-    const char *n = "?";
-    switch (e) {
-        case EACCES: n = "EACCES"; break;
-        case EPERM:  n = "EPERM";  break;
-        case ENOENT: n = "ENOENT"; break;
-        case EROFS:  n = "EROFS";  break;
-        case ENOTDIR:n = "ENOTDIR";break;
-        case ENAMETOOLONG: n = "ENAMETOOLONG"; break;
-        default: break;
-    }
-    return [NSString stringWithFormat:@"%d(%s)", e, n];
-}
-
+/* [MODIFIED] 放弃落盘日志: 设备实测 9 条候选路径 + HOME 全部失败
+ *   (thermalmonitord 的 sandbox 不允许写这些位置, 与 uid 无关)。
+ *   改为统一 NSLog → Apple 统一日志, 设备侧 Console.app / PC 侧 idevicesyslog 可见。
+ *   Console 过滤方式见交付说明: 进程名 thermalmonitord 或消息含 "Insulation"。 */
 static void InsDebugLog(NSString *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-
-    NSString *entry = [NSString stringWithFormat:@"[%@ pid=%d uid=%d] %@\n",
-                       [NSDate date], getpid(), getuid(), line];
-
-    if (gInsDebugLogPath[0] == '\0') {
-        /* 顺序按“daemon 最可能可写”排列: Media → Preferences → 插件目录 → tmp → root */
-        const char *fixedCands[] = {
-            "/var/mobile/Media/insulation-debug.log",
-            "/var/jb/var/mobile/Media/insulation-debug.log",
-            "/var/mobile/Library/Preferences/insulation-debug.log",
-            "/var/jb/var/mobile/Library/Preferences/insulation-debug.log",
-            "/var/jb/Library/MobileSubstrate/DynamicLibraries/insulation-debug.log",
-            "/private/var/tmp/insulation-debug.log",
-            "/var/tmp/insulation-debug.log",
-            "/tmp/insulation-debug.log",
-            "/var/root/insulation-debug.log",
-        };
-        const int candCount = (int)(sizeof(fixedCands) / sizeof(fixedCands[0]));
-        int errs[9] = {0};
-        for (int i = 0; i < candCount; i++) {
-            int fd = open(fixedCands[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (fd >= 0) {
-                close(fd);
-                chmod(fixedCands[i], 0644);
-                snprintf(gInsDebugLogPath, sizeof(gInsDebugLogPath), "%s", fixedCands[i]);
-                NSLog(@"[Insulation][debuglog] 选用路径: %s", fixedCands[i]);
-                break;
-            }
-            errs[i] = errno;
-        }
-        if (gInsDebugLogPath[0] == '\0') {
-            NSString *homePath = [NSHomeDirectory() stringByAppendingPathComponent:@"insulation-debug.log"];
-            int fd = open(homePath.UTF8String, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (fd >= 0) {
-                close(fd);
-                chmod(homePath.UTF8String, 0644);
-                snprintf(gInsDebugLogPath, sizeof(gInsDebugLogPath), "%s", homePath.UTF8String);
-                NSLog(@"[Insulation][debuglog] 选用路径: %@", homePath);
-            } else {
-                NSMutableString *detail = [NSMutableString string];
-                for (int i = 0; i < candCount; i++) {
-                    [detail appendFormat:@"%@=%@ ", [NSString stringWithUTF8String:fixedCands[i]], InsErrName(errs[i])];
-                }
-                [detail appendFormat:@"HOME=%@=%@", homePath, InsErrName(errno)];
-                NSLog(@"[Insulation][debuglog] 全部路径失败 uid=%d euid=%d | %@",
-                      getuid(), geteuid(), detail);
-            }
-        }
-    }
-
-    if (gInsDebugLogPath[0] != '\0') {
-        int fd = open(gInsDebugLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) {
-            const char *s = entry.UTF8String;
-            (void)write(fd, s, strlen(s));
-            close(fd);
-        } else {
-            NSLog(@"[Insulation][debuglog] 追加失败 path=%s errno=%d", gInsDebugLogPath, errno);
-            gInsDebugLogPath[0] = '\0';   /* 下次重新探测 */
-        }
-    }
-
-    /* 统一日志兜底: 即使落盘失败, Console/log stream 也能看到 */
-    NSLog(@"[Insulation] %@", line);
+    NSLog(@"[Insulation] pid=%d %@", getpid(), line);
 }
 
 /* Darwin 通知名 (与原 deb 二进制字符串一致) */
@@ -218,12 +133,15 @@ static void InsDebugLog(NSString *fmt, ...) {
 - (int)getPackageCPUPowerTarget;
 - (void)setCPMSMitigationsEnabled:(BOOL)a3;
 - (void)setCPULevel:(int)a3;
+- (void)setCPULowPowerTarget:(int)a3;
 - (void)setCPUPowerCeiling:(int)a3 fromDecisionSource:(int)a4;
 - (void)setCPUPowerFloor:(int)a3 fromDecisionSource:(int)a4;
 - (void)setCPUPowerZoneTarget:(int)a3;
 - (void)setMaxPackagePower:(int)a3;
 - (void)setPowerSaveActive:(BOOL)a3;
 - (void)updateCPU;
+- (void)updateGPU;
+- (void)updatePackage;
 - (instancetype)initForFastLoop:(BOOL)a3 noDisplay:(BOOL)a4 powerSaveParams:(id)a5 powerZoneParams:(id)a6;
 @end
 
@@ -493,7 +411,10 @@ static void InsApplyAdvancedSwitches(void) {
  *                                  → setPowerSaveActive:YES → setCPULevel:2
  *   日志 "insulation: low power mode at CPU level %d" 的实参为 w24=2 (0xc0d4 处 mov w24,#2 的来源)。
  *   lowPower 分支不调用 setCPMSMitigationsEnabled: / setCPUPowerCeiling: / setCPUPowerZoneTarget:。
- *   CPMS 缓解开关只出现在启动 initForFastLoop 路径 (0x12094: w2=1)。
+ *   [EVIDENCE] 全二进制中 setCPULevel:/setPowerSaveActive:/updateCPU 的 msgSend 只出现在
+ *   applyPowerMode(0xbe04) 内; 其余命中都是 ctor 里的 class_getInstanceMethod 安装点
+ *   (0x143e4 = setCPMSMitigationsEnabled: 的 method_setImplementation) 或 Swift 惰性 selector
+ *   (0x18c30)。即: lowPower 之外没有任何代码再改 CPU 档位。
  */
 static void InsApplyPowerMode(void) {
     os_unfair_lock_lock(&gLock);
@@ -510,15 +431,28 @@ static void InsApplyPowerMode(void) {
     }
 
     switch (mode) {
-        case InsPowerModeFullPower:
-            [mc setCPMSMitigationsEnabled:NO];   /* 关闭 CPMS 缓解 → CPU 不降频 */
+        case InsPowerModeFullPower: {
+            /* [EVIDENCE] 0xbe90..0xbf3c fullPower 分支:
+             *   updateCPU → PS:NO → CPULevel:0
+             *   → setCPULowPowerTarget:max([self+0x38], 0xC350=50000)
+             *   → setCPUPowerCeiling:…fromDecisionSource:0 → setCPUPowerFloor:0… → setCPUPowerZoneTarget:…
+             *   ([self+0x38] 对应 IPowerHepler.observedCPUPowerMax) */
+            unsigned cap = gObservedCPUPowerMax > 50000u ? gObservedCPUPowerMax : 50000u;
+            [mc updateCPU];
+            [mc setPowerSaveActive:NO];
+            [mc setCPULevel:0];
+            [mc setCPULowPowerTarget:(int)cap];
+            [mc setCPUPowerCeiling:(int)cap fromDecisionSource:0];
+            [mc setCPUPowerFloor:0 fromDecisionSource:0];
+            [mc setCPUPowerZoneTarget:(int)cap];
             ILog(@"insulation: full power mode");
             ILog(@"thermalPowerMode fullPower -> thermal mitigations disabled (%d)", 0);
             break;
+        }
         case InsPowerModeLowPower:
-            /* [EVIDENCE] 与 0xbe04 的 lowPower 分支一致: 档位是 2, 不是 1。
-             * 顺序: PS:YES → CPULevel:2 → updateCPU → PS:YES → CPULevel:2 */
-            [mc setCPMSMitigationsEnabled:YES];  /* [EVIDENCE] 启动路径 0x12094 传 w2=1; 切换路径不下发 */
+            /* [EVIDENCE] 与 0xbe04 的 lowPower 分支逐指令一致 (0xc020..0xc0e4):
+             *   档位是 2, 不是 1。顺序: PS:YES → CPULevel:2 → updateCPU → PS:YES → CPULevel:2。
+             *   该分支不调用 setCPMSMitigationsEnabled:/CPUPowerCeiling/ZoneTarget。 */
             [mc setPowerSaveActive:YES];         /* [EVIDENCE] 0xc028 / 0xc060, w2=1 */
             [mc setCPULevel:2];                  /* [EVIDENCE] 0xc03c, w24=2 */
             [mc updateCPU];                      /* [EVIDENCE] 0xc050 */
@@ -529,10 +463,15 @@ static void InsApplyPowerMode(void) {
             break;
         case InsPowerModeOff:
         default:
-            [mc setCPMSMitigationsEnabled:YES];
+            /* [EVIDENCE] 0xc190..0xc2d4 off/native 分支:
+             *   PS:NO → CPULevel:0 → updateCPU → updateGPU → updatePackage → PS:NO → CPULevel:0 */
             [mc setPowerSaveActive:NO];
-            /* 不在这里强设 setCPULevel:0: 会把正在生效的原生热缓解一并清掉;
-             * lowPower→off 由 daemon 重启保证不残留我们加的 level 1 钳制。 */
+            [mc setCPULevel:0];
+            [mc updateCPU];
+            [mc updateGPU];
+            [mc updatePackage];
+            [mc setPowerSaveActive:NO];
+            [mc setCPULevel:0];
             ILog(@"insulation: native thermal mode restored");
             ILog(@"thermalPowerMode native/lowPower -> thermal mitigations reset (%d)", 0);
             break;
@@ -733,13 +672,28 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
  * [INFERRED] fullPower 下: setCPULevel: 强制为 0(不限频); 功率 ceiling/floor 抬到观测最大值。
  * 这是 CPU 不降频的核心路径 —— 本改造对此不做任何改动。
  */
+/* [EVIDENCE] 前置声明: 重试表实现见 "初始化" 段 (0xc8bc 的 0.25/1/2/4/6/8/10s) */
+static void InsReapplySoon(int attempt, NSString *tag);
+
 %hook MitigationController
 
 - (id)initForFastLoop:(BOOL)fast noDisplay:(BOOL)noDisplay powerSaveParams:(id)psp powerZoneParams:(id)pzp {
     id res = %orig;
+    /* [EVIDENCE] 0xef6c..0xef80 (MitigationControllerHook.initForFastLoop 内部):
+     *   0xef68 x0 = ClassHook.target (= 本方法 self)
+     *   0xef70 str x0,[x23,#0x60]  → IPowerHepler.mitigationControllerObject(+0x60)
+     *   0xef80 bl 0xcc2c           → 立即 applyPowerMode
+     * 结论: x21(+0x60) 与本方法 self 是同一对象; 且原版每次 init 都覆盖。
+     *       我们这里必须"每次无条件覆盖", 不能只在 nil 时捕获(否则会拿到过期实例)。 */
+    os_unfair_lock_lock(&gLock);
     gMitigationController = self;   /* [EVIDENCE] mitigationControllerObject */
-    InsApplyPowerMode();            /* 启动时按当前模式应用一次 */
-    InsDebugLog(@"initForFastLoop: 已按当前模式应用 (mc=%p)", (void *)(__bridge void *)self);
+    os_unfair_lock_unlock(&gLock);
+
+    InsReloadPrefs();
+    InsApplyPowerMode();            /* 与原版一致: init 返回后立即下发 */
+    InsReapplySoon(1, @"initForFastLoop");
+    InsDebugLog(@"initForFastLoop: controller 绑定 mc=%p mode=%ld", 
+                (void *)(__bridge void *)self, (long)gPowerMode);
     return res;
 }
 
@@ -749,6 +703,10 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
 
     InsPowerMode mode;
     os_unfair_lock_lock(&gLock); mode = gPowerMode; os_unfair_lock_unlock(&gLock);
+    /* [DIAG] 决定性证据: 打印系统/自身每次 setCPULevel: 的实例与档位,
+     *   Console 里能看到 "level=2" 是否真的落地、以及 daemon 自己是否又把它改回去。 */
+    InsDebugLog(@"setCPULevel: self=%p level=%d mode=%ld",
+                (void *)(__bridge void *)self, level, (long)mode);
     if (mode == InsPowerModeFullPower && level != 0) {
         ILog(@"insulation cpu level lock %d -> %d", level, 0);
         %orig(0);        /* 强制 CPU level 0 = 不降频 */
@@ -871,10 +829,16 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
 #pragma mark - 初始化  [UPSTREAM InsulationTInit + NEW]
 
 /* [FIX][SAFETY] 不再 kill thermalmonitord。
+ *   [EVIDENCE] 原版对 -restartThermalMonitor 的真实做法 (0x13240 → 0x1343c → 0x137f0):
+ *     DispatchQueue.global().asyncAfter(.now() + 0.2s) { 0x13400:
+ *       NSLog("insulation: restarting thermalmonitord after CPU mode change");
+ *       kill(getpid(), SIGKILL); }
+ *   即在系统原生环境里靠 launchd 重新拉起 daemon, 由新的 initForFastLoop 应用档位。
  *   实测 (Dopamine 2.4.9.25 隐根 / iOS 15): kill(getpid(), SIGKILL) 后 launchd 没有把该 daemon
  *   拉起, `ps -A | grep thermalmonitord` 为空 → 热控进程缺失、日志为零、频率不降。
  *   结论: "SIGKILL + KeepAlive" 在本机不可靠, 安全优先, 彻底去掉自杀重启。
- *   替代: 进程内重应用 (立即 + 2s/4s 补刀), 再配合 setCPULevel: 常驻钳制把 level 锁在 2。
+ *   替代: 进程内重应用, 延迟序列与原版 0xc8bc 的重试表一致 (0.25/1/2/4/6/8/10s),
+ *   再配合 setCPULevel: 常驻钳制把 level 锁在 2。
  *   launchctl kickstart 的 label 需设备侧 `launchctl list | grep -i thermal` 取证;
  *   在未取证前不盲调外部 launchctl —— 避免再次把 daemon 停掉却拉不起来。
  *   [INFERRED] 进程内重应用能覆盖 daemon 内部状态: apply 直接调 MitigationController 的
@@ -882,16 +846,23 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
  */
 static BOOL gReapplyInProgress = NO;
 
+/* [EVIDENCE] 0xc8bc 的重试表: d8 = [0x29e28 + i + 0x28] (double),
+ *   实测常量序列 0.25 / 1 / 2 / 4 / 6 / 8 / 10 秒。原版在每次 refresh 后按此序列补刀。 */
+static const double kInsReapplyDelays[] = {0.25, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0};
+
 static void InsReapplySoon(int attempt, NSString *tag) {
-    NSTimeInterval delay = (attempt <= 1) ? 2.0 : 4.0;
+    int total = (int)(sizeof(kInsReapplyDelays) / sizeof(kInsReapplyDelays[0]));
+    if (attempt < 1 || attempt > total) return;
+    NSTimeInterval delay = kInsReapplyDelays[attempt - 1];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         InsReloadPrefs();
         InsApplyPowerMode();
         InsPowerMode mode;
         os_unfair_lock_lock(&gLock); mode = gPowerMode; os_unfair_lock_unlock(&gLock);
-        InsDebugLog(@"in-process reapply(%@): attempt=%d mode=%ld pid=%d", tag, attempt, (long)mode, getpid());
-        if (attempt < 3) InsReapplySoon(attempt + 1, tag);
+        InsDebugLog(@"reapply(%@): attempt=%d/%d delay=%.2fs mode=%ld pid=%d",
+                    tag, attempt, total, delay, (long)mode, getpid());
+        InsReapplySoon(attempt + 1, tag);
     });
 }
 
@@ -980,9 +951,9 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
 
 %ctor {
     @autoreleasepool {
-        /* [A] 心跳: 证明代码执行到了 ctor、以什么身份执行; 位于 %init 之前。 */
-        InsDebugLog(@"hello pid=%d uid=%d euid=%d mode=%ld",
-                    getpid(), getuid(), geteuid(), (long)gPowerMode);
+        /* [A] 心跳: 证明 dylib 被注入到了哪个进程、以什么身份执行; 位于 %init 之前。
+         *     Console 过滤 "INS_LOAD" 即可确认是否加载进 thermalmonitord。 */
+        InsDebugLog(@"INS_LOAD hello uid=%d euid=%d mode=%ld", getuid(), geteuid(), (long)gPowerMode);
 
         InsReloadPrefs();
 
@@ -1001,8 +972,8 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
 
         %init;
 
-        /* daemon 启动路径: ctor 已读到新的 thermalPowerMode; 此处若 MitigationController
-         * 尚未创建则自动推迟, 由 initForFastLoop: 应用。
+        /* daemon 启动路径: ctor 已读到新的 thermalPowerMode; 若 MitigationController
+         * 尚未创建则自动推迟, 由 initForFastLoop: 应用(并附带 0.25~10s 重试表)。
          * [B] 再叠加 2s 定时兜底(最多 5 次): 即使 initForFastLoop: 未命中也能补 apply。 */
         InsApplyPowerMode();
         InsFallbackApply(1);
