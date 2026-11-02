@@ -38,6 +38,32 @@ jobs:
           # libplist-utils 提供 plistutil: theos 需要它把旧式 ASCII 格式的
           # insulation.plist (Substrate filter) 转成二进制 plist, 缺它会打包失败
 
+      - name: 安装新 clang（arm64e ABI v2 需要 clang>=12; theos 自带的是 clang-11）
+        run: |
+          set -e
+          ver=""
+          # Ubuntu 24.04 仓库提供 clang-16/17/18; 逐个尝试, 成功即停
+          for v in 16 18 17 15; do
+            echo "== 尝试 clang-$v =="
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              "clang-$v" "libc++-$v-dev" "libc++abi-$v-dev" || continue
+            if command -v "clang-$v" >/dev/null 2>&1; then ver=$v; break; fi
+          done
+          if [ -z "$ver" ]; then
+            echo "== 退路: 只装 clang 本身 =="
+            for v in 16 18 17 15; do
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "clang-$v" || continue
+              command -v "clang-$v" >/dev/null 2>&1 && { ver=$v; break; }
+            done
+          fi
+          [ -n "$ver" ] || { echo "FATAL: 新 clang 安装失败"; exit 1; }
+          echo "CLANG_VER=$ver" >> "$GITHUB_ENV"
+          echo "== 选中 clang-$ver =="
+          "clang-$ver" --version | head -3
+          # ObjC++/Logos 预处理会吃 -stdlib=libc++ 的头文件
+          ls "/usr/lib/llvm-$ver/include/c++/v1/__config" >/dev/null 2>&1 \
+            && echo "libc++ 头已就位" || echo "WARN: libc++ 头缺失(libc++-$ver-dev 未装成功)"
+
       - name: 安装 ldid（release 单文件优先, 源码编译兜底; 不依赖 apt）
         run: |
           set -e
@@ -104,39 +130,132 @@ jobs:
           ls "$THEOS/sdks" | tee /dev/stderr
           ls -d "$THEOS"/sdks/iPhoneOS*.sdk >/dev/null || { echo "FATAL: 无 iPhoneOS SDK"; exit 1; }
 
+      - name: 把 theos 工具链的 clang 换成 clang-16（产 arm64e ABI v2）
+        env:
+          CLANG_VER: ${{ env.CLANG_VER }}
+        run: |
+          set -e
+          TB="$THEOS/toolchain/linux/iphone/bin"
+          [ -d "$TB" ] || { echo "FATAL: 缺少 $TB (theos 未安装成功?)"; exit 1; }
+          echo "== 替换前 =="
+          "$TB/clang" --version 2>&1 | head -2 || true
+          # theos 选编译器的确切机制(makefiles/targets/Linux/iphone.mk + _common/darwin_head.mk):
+          #   SDKBINPATH := $THEOS/toolchain/linux/iphone/bin
+          #   若存在 $TB/arm64-apple-darwin14-ld → _THEOS_TARGET_SDK_BIN_PREFIX=arm64-apple-darwin14-
+          #   → PREFIX=$TB/arm64-apple-darwin14-; TARGET_CC ?= $(PREFIX)clang
+          #   → 实际被调用的是 $TB/arm64-apple-darwin14-clang / ...-clang++
+          #   目标三元组由 theos 在 SDK>=13 时自己用 `-target arm64e-apple-ios15.0` 传入
+          #   (_common/darwin_tail.mk 的 VERSIONFLAGS), ld 由 `-fuse-ld=$TB/...-ld` 指定;
+          #   因此只需把这几个 clang 入口指向 clang-16, 其余(theos ld64/lipo/ldid)保持不动。
+          for f in "$TB"/*clang "$TB"/*clang++; do
+            [ -e "$f" ] || continue
+            case "$(basename "$f")" in
+              *++*) ln -sfn "/usr/bin/clang++-$CLANG_VER" "$f" ;;
+              *)    ln -sfn "/usr/bin/clang-$CLANG_VER"   "$f" ;;
+            esac
+            echo "linked: $(basename "$f") -> $(readlink -f "$f")"
+          done
+          hash -r
+          # 解析 theos 实际会调用的入口(顺序与 makefiles/targets/Linux/iphone.mk 一致)
+          if [ -e "$TB/armv7-apple-darwin11-ld" ]; then CC="$TB/armv7-apple-darwin11-clang"
+          elif [ -e "$TB/arm64-apple-darwin14-ld" ]; then CC="$TB/arm64-apple-darwin14-clang"
+          else CC="$TB/clang"; fi
+          echo "== 替换后 (theos 将调用: $CC) =="
+          "$CC" --version | head -3
+
+      - name: 自检 clang / ld 版本与 arm64e ABI v2
+        run: |
+          set -e
+          TB="$THEOS/toolchain/linux/iphone/bin"
+          if [ -e "$TB/armv7-apple-darwin11-ld" ]; then CC="$TB/armv7-apple-darwin11-clang"; LD="$TB/armv7-apple-darwin11-ld"
+          elif [ -e "$TB/arm64-apple-darwin14-ld" ]; then CC="$TB/arm64-apple-darwin14-clang"; LD="$TB/arm64-apple-darwin14-ld"
+          else CC="$TB/clang"; LD="$TB/ld"; fi
+          SDK_DIR=$(ls -d "$THEOS"/sdks/iPhoneOS*.sdk | sort -V | tail -1)
+          echo "SDK=$SDK_DIR"; echo "CC=$CC"; echo "LD=$LD"
+          echo "== clang --version =="; "$CC" --version
+          echo "== ld 版本 =="; "$LD" -v 2>&1 | head -3 || true
+          echo "== libroot =="; ls "$THEOS/lib" | grep -E 'libroot' || true
+          echo 'int probe_x;' > /tmp/probe.c
+          for arch in arm64 arm64e; do
+            "$CC" -target "$arch-apple-ios15.0" -isysroot "$SDK_DIR" \
+              -c /tmp/probe.c -o "/tmp/probe-$arch.o"
+            echo "== probe $arch =="; file "/tmp/probe-$arch.o"
+            file "/tmp/probe-$arch.o" | grep -q Mach-O || { echo "FATAL: $arch probe 非 Mach-O"; exit 1; }
+          done
+          # 结构化校验 arm64e 的 ABI: 新 ABI 的 cpusubtype 带 0x80000000 标记且 minos>=14.0
+          python3 - <<'PY'
+          import struct
+          d = open('/tmp/probe-arm64e.o','rb').read()
+          sub = struct.unpack('<I', d[8:12])[0]
+          ncmds = struct.unpack('<I', d[16:20])[0]
+          o, minos = 32, None
+          for _ in range(ncmds):
+              cmd, csz = struct.unpack('<II', d[o:o+8])
+              if cmd == 0x32: minos = struct.unpack('<I', d[o+12:o+16])[0]
+              elif cmd == 0x25: minos = struct.unpack('<I', d[o+8:o+12])[0]
+              if csz < 8: break
+              o += csz
+          print('arm64e cpusubtype=0x%08x minos=%s' % (sub, '%d.%d' % ((minos or 0) >> 16, ((minos or 0) >> 8) & 0xff)))
+          if not (sub & 0x80000000): raise SystemExit('FATAL: probe arm64e 是旧 ABI(v1)')
+          if minos is None or minos < (14 << 16): raise SystemExit('FATAL: probe arm64e minos<14.0')
+          PY
+
       - name: 编译
         env:
           SCHEME: ${{ matrix.scheme }}
         run: |
+          set -o pipefail
+          TB="$THEOS/toolchain/linux/iphone/bin"
+          if [ -e "$TB/armv7-apple-darwin11-ld" ]; then CC="$TB/armv7-apple-darwin11-clang"; LD="$TB/armv7-apple-darwin11-ld"
+          elif [ -e "$TB/arm64-apple-darwin14-ld" ]; then CC="$TB/arm64-apple-darwin14-clang"; LD="$TB/arm64-apple-darwin14-ld"
+          else CC="$TB/clang"; LD="$TB/ld"; fi
           # theos 只有 rootless/roothide 两个显式 scheme; rootful = 不设置该变量。
           # 直接传 THEOS_PACKAGE_SCHEME=rootful 会被 common.mk 判为非法 scheme 而 Stop。
-          if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; fi
-          echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}]"
-          echo "== 实际编译器 =="
-          if [ -x "$THEOS/toolchain/linux/iphone/bin/clang" ]; then
-            "$THEOS/toolchain/linux/iphone/bin/clang" --version | head -2
-          else
-            clang --version | head -1
+          ABI=""
+          if [ "$SCHEME" != "rootful" ]; then
+            export THEOS_PACKAGE_SCHEME="$SCHEME"
+            # Linux 上 theos 会强制 IS_NEW_ABI=0(makefiles/instance/rules.mk L125-131),
+            # 即链接 $THEOS/lib/libroot_oldabi.a —— 它的 arm64e 对象是 v1(subtype 0x00000002,
+            # minos 7.0), 与 clang-16 产出的 v2 对象混链会被 ld64 判为
+            # "incompatible arm64e ABI compiler"。rootless 必须改成链接
+            # $THEOS/lib/libroot.a(v2: subtype 0x80000002, minos 14.0)。
+            ABI="IS_NEW_ABI=1"
           fi
-          echo "ARCHS=arm64 (见 Makefile: theos Linux 工具链 clang-11 的 arm64e 为旧 ABI, 已收敛)"
+          echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}] make_extra=[${ABI:-<none>}]"
+          echo "== 实际编译器 =="; "$CC" --version | head -3
+          echo "== 实际链接器 =="; "$LD" -v 2>&1 | head -2 || true
+          echo "ARCHS 预期: rootless/roothide=arm64 arm64e, rootful=arm64 (见 Makefile)"
           make clean
-          make -j"$(nproc)"
+          make -j"$(nproc)" ${ABI} 2>&1 | tee /tmp/build.log
+          echo "== 构建里出现的 -target =="
+          grep -o -E -- '-target [a-z0-9]+-apple-ios[0-9.]+' /tmp/build.log | sort -u || true
+          echo "== arm64e 编译次数 =="; grep -c -- '-arch arm64e' /tmp/build.log || true
+          if grep -q 'incompatible arm64e ABI' /tmp/build.log; then
+            echo "FATAL: 链接器报告 arm64e ABI 不兼容(工具链/libroot stub 不一致)"; exit 1
+          fi
 
       - name: 打包并校验
         env:
           SCHEME: ${{ matrix.scheme }}
         run: |
-          if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; fi
+          ABI=""
+          if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; ABI="IS_NEW_ABI=1"; fi
           echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}]"
-          make package FINALPACKAGE=1
+          make package FINALPACKAGE=1 ${ABI}
           deb=$(ls -t packages/*.deb | head -1)
           echo "产物: $deb ($(du -h "$deb" | cut -f1))"
           dpkg-deb -I "$deb"
           dpkg-deb -c "$deb"
 
-      - name: 校验产物（切片数 / rootless 路径 / Info.plist）
+      - name: 校验产物（arm64+arm64e 双切片 / ABI v2 / rootless 路径 / Info.plist）
+        env:
+          SCHEME: ${{ matrix.scheme }}
         run: |
           set -e
+          TB="$THEOS/toolchain/linux/iphone/bin"
+          if [ -x "$TB/armv7-apple-darwin11-lipo" ]; then LIPO="$TB/armv7-apple-darwin11-lipo"
+          elif [ -x "$TB/arm64-apple-darwin14-lipo" ]; then LIPO="$TB/arm64-apple-darwin14-lipo"
+          else LIPO=$(command -v lipo || echo lipo); fi
           deb=$(ls -t packages/*.deb | head -1)
           rm -rf /tmp/chk && mkdir -p /tmp/chk
           dpkg-deb -x "$deb" /tmp/chk
@@ -144,15 +263,61 @@ jobs:
           exe="$bundle/InsulationPrefs"
           dylib=$(find /tmp/chk -name "insulation.dylib" | head -1)
           echo "== 布局 =="; echo "bundle=$bundle"; echo "dylib=$dylib"
+          # 断言方向: 目标进程(Preferences / thermalmonitord)都是 arm64e, 镜像必须含 arm64e 切片;
+          # 纯 arm64 会被 dlopen_preflight 拒绝("have 'arm64', need 'arm64e'")。
+          # rootful 例外: 部署 12.2<14.0, clang>=12 产不出 arm64e(v1), 要求 arm64 单切片。
+          if [ "$SCHEME" = "rootful" ]; then wanted="arm64"; else wanted="arm64 arm64e"; fi
+          echo "== 期望切片: $wanted =="
           for f in "$exe" "$dylib"; do
             [ -f "$f" ] || { echo "FATAL: 缺少 $f"; exit 1; }
             echo "== $f =="; file "$f"
-            # 回归护栏: clang-11 产出的 arm64e 是旧 ABI, 在 iOS 14+ 的 arm64e 设备上会把
-            # Settings 装载面板时打崩; 两个二进制都只允许 arm64 单切片
-            if file "$f" | grep -q "arm64e"; then
-              echo "FATAL: $f 含 arm64e 切片(clang-11 旧 ABI)"; exit 1
-            fi
+            info=$("$LIPO" -info "$f"); echo "$info"
+            for a in $wanted; do
+              echo "$info" | grep -qw "$a" || { echo "FATAL: $f 缺少 $a 切片"; exit 1; }
+            done
           done
+          # arm64e 必须 iOS14+ ABI v2: cpusubtype 带 0x80000000 标记 + minos>=14.0
+          if [ "$SCHEME" != "rootful" ]; then
+          python3 - "$exe" "$dylib" <<'PY'
+          import struct, sys
+          def abi(p):
+              d = open(p,'rb').read()
+              base = None
+              if d[:4] == b'\xca\xfe\xba\xbe':
+                  n = struct.unpack('>I', d[4:8])[0]
+                  for i in range(n):
+                      cpu, sub, off, sz, al = struct.unpack('>iiIII', d[8+20*i:8+20*i+20])
+                      if cpu == 0x0100000C and sub == 2:
+                          base = off
+              else:
+                  base = 0 if struct.unpack('<i', d[4:8])[0] == 0x0100000C else None
+              if base is None:
+                  return None
+              sub = struct.unpack('<I', d[base+8:base+12])[0]
+              ncmds = struct.unpack('<I', d[base+16:base+20])[0]
+              o, minos = base + 32, None
+              for _ in range(ncmds):
+                  cmd, csz = struct.unpack('<II', d[o:o+8])
+                  if cmd == 0x32: minos = struct.unpack('<I', d[o+12:o+16])[0]
+                  elif cmd == 0x25: minos = struct.unpack('<I', d[o+8:o+12])[0]
+                  if csz < 8: break
+                  o += csz
+              return sub, minos
+          ok = True
+          for p in sys.argv[1:]:
+              r = abi(p)
+              print(p)
+              if r is None:
+                  print('  FATAL: 没有 arm64e 切片'); ok = False; continue
+              sub, minos = r
+              print('  arm64e cpusubtype=0x%08x minos=%d.%d' % (sub, (minos or 0) >> 16, ((minos or 0) >> 8) & 0xff))
+              if not (sub & 0x80000000):
+                  print('  FATAL: 旧 ABI(v1), iOS14+ 会拒绝/崩溃'); ok = False
+              if minos is None or minos < (14 << 16):
+                  print('  FATAL: minos < 14.0'); ok = False
+          sys.exit(0 if ok else 1)
+          PY
+          fi
           echo "== 动态依赖 =="
           grep -a -o "@rpath/[A-Za-z0-9_.]*" "$exe" | sort -u || true
           echo "== Info.plist =="
