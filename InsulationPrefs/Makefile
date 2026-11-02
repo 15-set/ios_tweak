@@ -23,8 +23,16 @@ BUNDLE_NAME = InsulationPrefs
 
 InsulationPrefs_FILES = IPRootListController.m
 InsulationPrefs_CFLAGS = -fobjc-arc
-InsulationPrefs_PRIVATE_FRAMEWORKS = Preferences
 InsulationPrefs_INSTALL_PATH = /Library/PreferenceBundles
+
+# [BUILD-FIX-I] 不再强链 Preferences.framework:
+#   Xcode SDK 里 Preferences.framework 有头文件(编译能过, PSListController/PSSpecifier 声明可用),
+#   但没有 Preferences.tbd → `ld: framework 'Preferences' not found`, bundle 链接失败。
+#   本工程只用到 ObjC 类与 ObjC 消息(superclass=PSListController,
+#   -loadSpecifiersFromPlistName:target: / -reloadSpecifier:animated:), 没有任何 Preferences 的 C 函数/全局变量,
+#   所以改用动态解析: 未定义符号留给 dyld 在 dlopen 时从已加载的 Preferences 进程镜像里解析。
+#   注: 变量名必须是 <实例>_LDFLAGS (theos: instance/rules.mk L212 取 $(inst)_LDFLAGS)。
+InsulationPrefs_LDFLAGS = -Wl,-undefined,dynamic_lookup
 
 # libroot 由 theos 在 rootless/roothide 方案下自动链接, 不手动 -lroot
 
