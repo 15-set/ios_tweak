@@ -171,9 +171,25 @@ static NSString *InsPrefsPath(void) {
     extern CFDictionaryRef IOPSGetPowerSourceDescription(CFTypeRef blob, CFTypeRef ps);
 #endif
 
-/* IOHIDServiceClient 属性读取 (IOKit 导出, thermalmonitord 进程内可用) */
+/* [BUILD-FIX-D] IOHIDServiceClient 属性读取
+ *   IOHIDServiceClientGetProperty 是 IOKit 的私有导出, 不在 SDK 的 IOKit.tbd (stub) 里,
+ *   直接 extern 引用会在链接期报 Undefined symbols (arm64 / arm64e 均会)。
+ *   改 dlsym(RTLD_DEFAULT, ...) 运行时解析 + dispatch_once 缓存: 签名/返回所有权(Get 规则,
+ *   不转移持有)与原 ABI 完全一致。解析失败 → 返回 NULL → 调用方按「非电池服务」处理
+ *   (= 保持吞掉事件, 与原版行为一致的安全侧)。 */
 typedef const struct __IOHIDServiceClient *IOHIDServiceClientRef;
-extern CFTypeRef IOHIDServiceClientGetProperty(IOHIDServiceClientRef service, CFStringRef key);
+typedef CFTypeRef (*InsIOHIDGetProperty_t)(IOHIDServiceClientRef service, CFStringRef key);
+
+static CFTypeRef InsIOHIDServiceClientGetProperty(IOHIDServiceClientRef service, CFStringRef key) {
+    static InsIOHIDGetProperty_t pGet;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY | RTLD_GLOBAL);
+        pGet = (InsIOHIDGetProperty_t)dlsym(RTLD_DEFAULT, "IOHIDServiceClientGetProperty");
+        if (!pGet) ILog(@"IOHIDServiceClientGetProperty 符号解析失败 (dlsym), 电池传感器判定恒为「非电池」");
+    });
+    return pGet ? pGet(service, key) : NULL;
+}
 
 /* IOPS 字典键 (IOPSKeys.h 等价物) */
 #define kInsIOPSType           CFSTR("Type")
@@ -450,14 +466,14 @@ static BOOL InsIsBatteryThermalService(id service) {
     BOOL isBattery = NO;
     CFStringRef keys[] = { CFSTR("Product"), CFSTR("Transport"), CFSTR("Manufacturer"), CFSTR("Name") };
     for (int i = 0; i < 4 && !isBattery; i++) {
-        CFTypeRef v = IOHIDServiceClientGetProperty(sc, keys[i]);
+        CFTypeRef v = InsIOHIDServiceClientGetProperty(sc, keys[i]);
         if (v && CFGetTypeID(v) == CFStringGetTypeID()) {
             NSString *s = [(__bridge NSString *)v lowercaseString];
             if ([s containsString:@"batt"] || [s containsString:@"gas"]) isBattery = YES;
         }
     }
     if (!isBattery) {
-        CFTypeRef page = IOHIDServiceClientGetProperty(sc, CFSTR("PrimaryUsagePage"));
+        CFTypeRef page = InsIOHIDServiceClientGetProperty(sc, CFSTR("PrimaryUsagePage"));
         if (page && CFGetTypeID(page) == CFNumberGetTypeID()) {
             int32_t p = 0; CFNumberGetValue((CFNumberRef)page, kCFNumberSInt32Type, &p);
             if (p == 0x84) isBattery = YES;   /* Power Devices usage page */
@@ -475,10 +491,10 @@ static BOOL InsIsBatteryThermalService(id service) {
                  /* [MEM-FIX] IOHIDServiceClientGetProperty 是 Get 规则(不拥有),
                   * 原 CFBridgingRelease 会把非持有对象 -release → over-release, 真机可能崩溃。
                   * 改用 __bridge 不转移所有权; sc 已被 CFBridgingRetain 持有, 调用期间属性有效。 */
-                 (__bridge id)IOHIDServiceClientGetProperty(sc, CFSTR("Product")),
-                 (__bridge id)IOHIDServiceClientGetProperty(sc, CFSTR("Transport")),
-                 (__bridge id)IOHIDServiceClientGetProperty(sc, CFSTR("Manufacturer")),
-                 (__bridge id)IOHIDServiceClientGetProperty(sc, CFSTR("PrimaryUsagePage")),
+                 (__bridge id)InsIOHIDServiceClientGetProperty(sc, CFSTR("Product")),
+                 (__bridge id)InsIOHIDServiceClientGetProperty(sc, CFSTR("Transport")),
+                 (__bridge id)InsIOHIDServiceClientGetProperty(sc, CFSTR("Manufacturer")),
+                 (__bridge id)InsIOHIDServiceClientGetProperty(sc, CFSTR("PrimaryUsagePage")),
                  isBattery ? @"电池" : @"其他");
         }
     }

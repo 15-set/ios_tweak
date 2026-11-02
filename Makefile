@@ -19,7 +19,14 @@ else
 TARGET = iphone:clang:latest:12.2
 endif
 
-ARCHS = arm64 arm64e
+# [BUILD-FIX-E] arm64e 切片收敛为 arm64:
+#   CI 用 install-theos 自带的 Linux 工具链 ($THEOS/toolchain/linux/iphone/bin/clang, 实为 clang-11),
+#   其 arm64e 代码生成是旧 ABI, 与 iOS 14+ 的 pAC ABI 不兼容, 链接期报
+#   "object file ... was built with an incompatible arm64e ABI compiler", 且真机有崩溃风险。
+#   A12+ 设备的 dyld 允许 arm64 slice 回退加载 (历史上 arm64-only 插件在 arm64e 设备上均可运行),
+#   功能不受影响, 仅失去 pointer-auth 优化。需要双切片时可用
+#   `make ARCHS="arm64 arm64e"` (命令行覆盖本文件, 但必须使用新工具链: theos docker 镜像 / macOS)。
+ARCHS = arm64
 DEBUG = 0
 
 include $(THEOS)/makefiles/common.mk

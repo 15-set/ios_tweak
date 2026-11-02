@@ -112,7 +112,13 @@ jobs:
           # 直接传 THEOS_PACKAGE_SCHEME=rootful 会被 common.mk 判为非法 scheme 而 Stop。
           if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; fi
           echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}]"
-          echo "TARGET 见 Makefile; ARCHS=arm64 arm64e"
+          echo "== 实际编译器 =="
+          if [ -x "$THEOS/toolchain/linux/iphone/bin/clang" ]; then
+            "$THEOS/toolchain/linux/iphone/bin/clang" --version | head -2
+          else
+            clang --version | head -1
+          fi
+          echo "ARCHS=arm64 (见 Makefile: theos Linux 工具链 clang-11 的 arm64e 为旧 ABI, 已收敛)"
           make clean
           make -j"$(nproc)"
 
