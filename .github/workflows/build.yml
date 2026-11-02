@@ -9,7 +9,11 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 锁定 ubuntu-24.04, 不用 ubuntu-latest:
+    # 2026-11 起 latest 已切到 26.04 "resolute", 其仓库无 ldid 包
+    # (实测日志: "E: Unable to locate package ldid"), 且新 glibc 环境
+    # 可能给 theos/ldid 引入额外风险。24.04 仓库含 ldid 与 libplist-utils。
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -20,7 +24,7 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
-      - name: 安装构建依赖
+      - name: 安装构建依赖（不含 ldid, 单独处理）
         run: |
           set -e
           # Azure apt 源偶发 403/Hash Sum mismatch 是 Actions 高频瞬态失败, update 加重试
@@ -29,10 +33,35 @@ jobs:
             echo "apt-get update 第 $i 次失败, 10s 后重试"; sleep 10
           done
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git make perl clang ldid dpkg fakeroot \
+            git make perl clang dpkg fakeroot \
             libplist-utils libssl-dev zlib1g-dev zstd curl unzip ca-certificates
           # libplist-utils 提供 plistutil: theos 需要它把旧式 ASCII 格式的
           # insulation.plist (Substrate filter) 转成二进制 plist, 缺它会打包失败
+
+      - name: 安装 ldid（apt 优先, 失败则用 Procursus 预编译二进制兜底）
+        run: |
+          set -e
+          if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ldid; then
+            echo "ldid 来自 apt"
+          else
+            echo "apt 无 ldid, 下载 ProcursusTeam/ldid v2.1.5-procursus7 预编译 x86_64 二进制"
+            mkdir -p "$HOME/bin"
+            curl -fsSL --retry 3 -o "$HOME/bin/ldid" \
+              https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64
+            chmod +x "$HOME/bin/ldid"
+            echo "$HOME/bin" >> "$GITHUB_PATH"
+          fi
+          # 硬检查: 两级都失败则明确失败, 不静默继续
+          command -v ldid || { echo "FATAL: ldid 不可用"; exit 1; }
+          ldid 2>&1 | head -1 || true
+
+      - name: 环境预检
+        run: |
+          echo "== os =="; . /etc/os-release; echo "$PRETTY_NAME"
+          echo "== ldid =="; command -v ldid
+          echo "== plistutil =="; command -v plistutil
+          echo "== clang =="; clang --version | head -1
+          echo "== THEOS =="; echo "$THEOS"; [ -d "$THEOS" ] && echo "(已存在)" || echo "(尚未安装, 预期)"
 
       - name: 安装 theos（官方安装脚本, 自动递归子模块 logos/libsubstrate 等）
         run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
