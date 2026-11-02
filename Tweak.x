@@ -153,7 +153,7 @@ static void InsDebugLog(NSString *fmt, ...) {
 - (void)setMaxPackagePower:(int)a3;
 - (void)setPowerSaveActive:(BOOL)a3;
 - (void)updateCPU;
-- (id)initForFastLoop:(BOOL)a3 noDisplay:(BOOL)a4 powerSaveParams:(id)a5 powerZoneParams:(id)a6;
+- (instancetype)initForFastLoop:(BOOL)a3 noDisplay:(BOOL)a4 powerSaveParams:(id)a5 powerZoneParams:(id)a6;
 @end
 
 @interface ComponentControl : NSObject
@@ -461,7 +461,7 @@ static void InsApplyPowerMode(void) {
     }
 
     InsDebugLog(@"apply 完成: mode=%ld mc=%p CPULevel=%d",
-                (long)mode, (void *)mc, (int)[mc CPULevel]);
+                (long)mode, (void *)(__bridge void *)mc, (int)[mc CPULevel]);
 
     /* [EVIDENCE] 发布运行时状态: notify_set_state + com.be-huge.insulation.runtimeState */
     uint64_t stateCode = (uint64_t)mode;
@@ -620,11 +620,11 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
  */
 %hook MitigationController
 
-- (void)initForFastLoop:(BOOL)fast noDisplay:(BOOL)noDisplay powerSaveParams:(id)psp powerZoneParams:(id)pzp {
+- (id)initForFastLoop:(BOOL)fast noDisplay:(BOOL)noDisplay powerSaveParams:(id)psp powerZoneParams:(id)pzp {
     id res = %orig;
     gMitigationController = self;   /* [EVIDENCE] mitigationControllerObject */
     InsApplyPowerMode();            /* 启动时按当前模式应用一次 */
-    InsDebugLog(@"initForFastLoop: 已按当前模式应用 (mc=%p)", (void *)self);
+    InsDebugLog(@"initForFastLoop: 已按当前模式应用 (mc=%p)", (void *)(__bridge void *)self);
     return res;
 }
 
@@ -879,6 +879,6 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
                     getpid(), (long)startupMode,
                     startupProtect ? @"开" : @"关",
                     startupReleased ? @"已永久交还原生" : @"插件接管(原行为)",
-                    (void *)gMitigationController);
+                    (void *)(__bridge void *)gMitigationController);
     }
 }
