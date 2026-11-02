@@ -33,6 +33,11 @@
 #import <os/lock.h>
 #import <IOKit/IOKitLib.h>
 #import <dlfcn.h>          /* [BUILD-FIX-C] dlsym: SCPreferences* 在 iOS SDK 标记 unavailable, 改运行时取符号 */
+#import <signal.h>         /* [NEW] kill(getpid(), SIGKILL) 重启 thermalmonitord */
+#import <unistd.h>         /* [NEW] getpid */
+#import <sys/stat.h>       /* [NEW] chmod: 调试日志可被 mobile 用户 tail */
+#import <stdio.h>          /* [NEW] fopen/fputs: 落盘诊断 */
+#import <stdarg.h>         /* [NEW] va_list */
 
 /* [BUILD-FIX-A] 私有类前向声明: 与下方 @interface 并存合法, 双保险保证
  * 全局指针及 Logos 生成代码处的类型可见性 */
@@ -75,6 +80,30 @@ static NSString *InsPrefsPath(void) {
 #pragma mark - 常量
 
 #define ILog(fmt, ...) NSLog(@"[Insulation] " fmt, ##__VA_ARGS__)
+
+/* [NEW] 不依赖 `log stream` 的落盘诊断: 直接追加到固定文件, 手机端 `tail` 即可看。
+ *   路径固定为真实用户域, 不随 jbroot 变化; root 进程写, 权限调成 0644 供 mobile 读取。 */
+#define kInsDebugLogPath "/var/mobile/Library/Preferences/insulation-debug.log"
+
+static void InsDebugLog(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+
+    NSString *entry = [NSString stringWithFormat:@"[%@ pid=%d] %@\n", [NSDate date], getpid(), line];
+
+    /* thermalmonitord 受 sandbox 限制, 首选失败时回退 /var/tmp (两者都对 mobile 可读) */
+    const char *candidates[] = { kInsDebugLogPath, "/var/tmp/insulation-debug.log" };
+    for (int i = 0; i < 2; i++) {
+        FILE *f = fopen(candidates[i], "a");
+        if (!f) continue;
+        fputs(entry.UTF8String, f);
+        fclose(f);
+        chmod(candidates[i], 0644);
+        return;
+    }
+}
 
 /* Darwin 通知名 (与原 deb 二进制字符串一致) */
 #define kInsNotifExecutePuppet   "com.be-huge.insulation-executePuppetEvent"
@@ -211,7 +240,11 @@ static BOOL gBatteryThermalReleased  = NO;    /* NO=插件接管(原行为) / YE
 #pragma mark - 偏好读取
 
 static void InsReloadPrefs(void) {
-    NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:InsPrefsPath()] ?: @{};
+    NSString *path = InsPrefsPath();
+    NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:path];
+    /* [FIX] 隐根/roothide 下 jbroot 前缀路径可能不含用户域偏好, 回退真实路径读取 */
+    if (!p) p = [NSDictionary dictionaryWithContentsOfFile:kInsPrefsPathRel];
+    p = p ?: @{};
 
     os_unfair_lock_lock(&gLock);
 
@@ -235,7 +268,9 @@ static void InsReloadPrefs(void) {
     os_unfair_lock_unlock(&gLock);
 
     /* [DIAG] 每次重载都打印实际读到的值, 与面板侧 "已同步" 日志成对定位 */
-    ILog(@"读取偏好: path=%@ thermalPowerMode=%@", InsPrefsPath(), mode);
+    ILog(@"读取偏好: path=%@ thermalPowerMode=%@", path, mode);
+    InsDebugLog(@"读取偏好: path=%@ thermalPowerMode=%@ released=%@",
+                path, mode, enabled ? @"YES" : @"NO");
 
     if (wasReleased != enabled) {
         ILog(@"电池温控控制权: %@ | 开关=%@ | CPU 路径不受影响(永不放行)",
@@ -390,6 +425,14 @@ static void InsApplyPowerMode(void) {
     os_unfair_lock_unlock(&gLock);
 
     MitigationController *mc = gMitigationController;
+    if (!mc) {
+        /* daemon 启动早期 ctor 阶段 MitigationController 还没创建;
+         * 真正的应用点在 Hook 4 的 initForFastLoop: 里(见该处注释)。 */
+        ILog(@"等待 MitigationController 初始化后应用模式(%ld)", (long)mode);
+        InsDebugLog(@"apply 推迟: MitigationController=nil, mode=%ld", (long)mode);
+        return;
+    }
+
     switch (mode) {
         case InsPowerModeFullPower:
             [mc setCPMSMitigationsEnabled:NO];   /* 关闭 CPMS 缓解 → CPU 不降频 */
@@ -399,17 +442,26 @@ static void InsApplyPowerMode(void) {
         case InsPowerModeLowPower:
             [mc setCPMSMitigationsEnabled:YES];  /* [INFERRED] 恢复缓解, 模拟低电 */
             [mc setPowerSaveActive:YES];         /* [INFERRED] 模拟低电量模式 */
-            ILog(@"insulation: low power mode at CPU level %d", mc ? [mc CPULevel] : 0);
+            /* [INFERRED] 原版日志 "low power mode at CPU level %d" 表明 lowPower 会下发
+             * 一个非 0 的 CPU mitigation level; 取最小档 1 (setCPULevel: 的钳制见 Hook 4)。
+             * 若真机仍测不到降频, 只需调这里的目标档位, 不改交互链路。 */
+            [mc setCPULevel:1];
+            ILog(@"insulation: low power mode at CPU level %d", 1);
             ILog(@"thermalPowerMode native/lowPower -> thermal mitigations reset (%d)", 0);
             break;
         case InsPowerModeOff:
         default:
             [mc setCPMSMitigationsEnabled:YES];
             [mc setPowerSaveActive:NO];
+            /* 不在这里强设 setCPULevel:0: 会把正在生效的原生热缓解一并清掉;
+             * lowPower→off 由 daemon 重启保证不残留我们加的 level 1 钳制。 */
             ILog(@"insulation: native thermal mode restored");
             ILog(@"thermalPowerMode native/lowPower -> thermal mitigations reset (%d)", 0);
             break;
     }
+
+    InsDebugLog(@"apply 完成: mode=%ld mc=%p CPULevel=%d",
+                (long)mode, (void *)mc, (int)[mc CPULevel]);
 
     /* [EVIDENCE] 发布运行时状态: notify_set_state + com.be-huge.insulation.runtimeState */
     uint64_t stateCode = (uint64_t)mode;
@@ -568,10 +620,11 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
  */
 %hook MitigationController
 
-- (id)initForFastLoop:(BOOL)fast noDisplay:(BOOL)noDisplay powerSaveParams:(id)psp powerZoneParams:(id)pzp {
+- (void)initForFastLoop:(BOOL)fast noDisplay:(BOOL)noDisplay powerSaveParams:(id)psp powerZoneParams:(id)pzp {
     id res = %orig;
     gMitigationController = self;   /* [EVIDENCE] mitigationControllerObject */
     InsApplyPowerMode();            /* 启动时按当前模式应用一次 */
+    InsDebugLog(@"initForFastLoop: 已按当前模式应用 (mc=%p)", (void *)self);
     return res;
 }
 
@@ -581,6 +634,11 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
     if (mode == InsPowerModeFullPower && level != 0) {
         ILog(@"insulation cpu level lock %d -> %d", level, 0);
         %orig(0);        /* 强制 CPU level 0 = 不降频 */
+        return;
+    }
+    /* [INFERRED] lowPower: 持续钳制在 level 1(模拟低电), 防止原生后续把 level 改回 0 */
+    if (mode == InsPowerModeLowPower && level < 1) {
+        %orig(1);
         return;
     }
     %orig;
@@ -685,6 +743,57 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
 
 #pragma mark - 初始化  [UPSTREAM InsulationTInit + NEW]
 
+/* [NEW] 原版重启语义: 面板只发 Darwin 通知(无权杀 root daemon),
+ *       由 thermalmonitord 内的本 tweak 自己 kill(getpid(), SIGKILL),
+ *       launchd(KeepAlive) 拉起 → ctor 重新读偏好并由 initForFastLoop: 应用模式。
+ *       证据: 原 deb 导入 _kill/_getpid, 字符串 "insulation: restarting thermalmonitord
+ *       after CPU mode change" + 通知名 com.be-huge.insulation-restartThermalMonitor。
+ *       自保护: 模式未变化 / 已在重启流程中 → 不重启, 避免通知抖动造成重启循环。 */
+static BOOL gRestartInProgress = NO;
+/* 本进程启动时读到的模式(ctor 里写入)。重启判断必须与它比较, 不能与 gPowerMode 比较:
+ * executePuppet 通知会先把同进程内的 gPowerMode 更新为新值, 若比较它会永远认为"没变化"而跳过重启。 */
+static InsPowerMode gStartupPowerMode = InsPowerModeOff;
+
+static void InsOnRestartRequested(CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                  const void *object, CFDictionaryRef userInfo) {
+    NSString *path = InsPrefsPath();
+    NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:path];
+    if (!p) p = [NSDictionary dictionaryWithContentsOfFile:kInsPrefsPathRel];
+    NSString *raw = [p[kPrefPowerMode] isKindOfClass:[NSString class]] ? p[kPrefPowerMode] : @"off";
+
+    InsPowerMode target;
+    if ([raw isEqualToString:@"lowPower"])       target = InsPowerModeLowPower;
+    else if ([raw isEqualToString:@"fullPower"]) target = InsPowerModeFullPower;
+    else                                          target = InsPowerModeOff;
+
+    os_unfair_lock_lock(&gLock);
+    InsPowerMode startup = gStartupPowerMode;
+    BOOL busy = gRestartInProgress;
+    if (!busy) gRestartInProgress = YES;
+    os_unfair_lock_unlock(&gLock);
+
+    if (busy) {
+        InsDebugLog(@"重启请求忽略: 已有重启流程在进行");
+        return;
+    }
+    if (target == startup) {
+        ILog(@"重启请求忽略: 模式未变化(%@)", raw);
+        InsDebugLog(@"重启请求忽略: 模式未变化(%@)", raw);
+        os_unfair_lock_lock(&gLock); gRestartInProgress = NO; os_unfair_lock_unlock(&gLock);
+        return;
+    }
+
+    ILog(@"收到重启请求: 启动模式=%ld -> 目标模式=%ld (0.4s 后重启 thermalmonitord)", (long)startup, (long)target);
+    InsDebugLog(@"收到重启请求: 启动模式=%ld -> 目标模式=%ld", (long)startup, (long)target);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        ILog(@"insulation: restarting thermalmonitord after CPU mode change");
+        InsDebugLog(@"kill(getpid()=%d, SIGKILL), 目标模式=%ld", getpid(), (long)target);
+        kill(getpid(), SIGKILL);   /* [INFERRED] 原版用 _kill/_getpid 重启, 信号未逐字节确认 */
+    });
+}
+
 static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     os_unfair_lock_lock(&gLock);
     InsPowerMode beforeMode = gPowerMode;
@@ -745,14 +854,31 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
                                         CFSTR(kInsNotifExecutePuppet), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(center, NULL, InsOnPrefsChanged,
                                         CFSTR(kInsNotifBatteryChanged), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        /* [NEW] 面板切换 CPU 模式后请求重启 daemon (原版语义) */
+        CFNotificationCenterAddObserver(center, NULL, InsOnRestartRequested,
+                                        CFSTR(kInsNotifRestartTM), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 
         %init;
 
+        /* daemon 启动路径: ctor 已读到新的 thermalPowerMode; 此处若 MitigationController
+         * 尚未创建则自动推迟, 由 initForFastLoop: 应用。 */
+        InsApplyPowerMode();
+
         os_unfair_lock_lock(&gLock);
-        ILog(@"insulation loaded (Logos 重建版 + 电池原生温控开关) | mode=%ld | 开关=%@ | 电池温控控制权:%@ | CPU 路径不受影响(永不放行)",
-             (long)gPowerMode,
-             gChargingProtectEnabled ? @"开" : @"关",
-             gBatteryThermalReleased ? @"已永久交还原生" : @"插件接管(原行为)");
+        InsPowerMode startupMode = gPowerMode;
+        BOOL startupProtect = gChargingProtectEnabled;
+        BOOL startupReleased = gBatteryThermalReleased;
+        gStartupPowerMode = startupMode;   /* 重启判据的基准: 本进程启动时的模式 */
         os_unfair_lock_unlock(&gLock);
+
+        ILog(@"insulation loaded (Logos 重建版 + 电池原生温控开关) | mode=%ld | 开关=%@ | 电池温控控制权:%@ | CPU 路径不受影响(永不放行)",
+             (long)startupMode,
+             startupProtect ? @"开" : @"关",
+             startupReleased ? @"已永久交还原生" : @"插件接管(原行为)");
+        InsDebugLog(@"ctor 启动: pid=%d mode=%ld 开关=%@ 控制权=%@ mc=%p",
+                    getpid(), (long)startupMode,
+                    startupProtect ? @"开" : @"关",
+                    startupReleased ? @"已永久交还原生" : @"插件接管(原行为)",
+                    (void *)gMitigationController);
     }
 }

@@ -105,6 +105,18 @@ static NSString *InsPrefsPath(void) {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              (__bridge CFStringRef)notification, NULL, NULL, true);
     }
+
+    /* [NEW] 与原版一致: CPU 模式切换后请求 thermalmonitord 重启。
+     * 面板(mobile)无权 kill root daemon, 只发 Darwin 通知;
+     * 由 daemon 内的 tweak 观察该通知后自己 kill(getpid()), launchd 拉起。
+     * 证据: 原 deb 含 com.be-huge.insulation-restartThermalMonitor 与
+     *       "insulation: restarting thermalmonitord after CPU mode change"。 */
+    if ([key isEqualToString:@"thermalPowerMode"]) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFSTR("com.be-huge.insulation-restartThermalMonitor"),
+                                             NULL, NULL, true);
+        NSLog(@"[InsulationPrefs] 已请求重启 thermalmonitord (key=%@ value=%@)", key, value);
+    }
 }
 
 #pragma mark - CPU 模式: 原版「选中即生效」交互
