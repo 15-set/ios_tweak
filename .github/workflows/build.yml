@@ -172,19 +172,18 @@ jobs:
           if [ "$SCHEME" != "rootful" ]; then
           python3 - "$exe" "$dylib" <<'PY'
           import struct, sys
-          def abi(p):
+          def slices(p):
               d = open(p,'rb').read()
-              base = None
-              if d[:4] == b'\xca\xfe\xba\xbe':
+              if d[:4] == b'\xca\xfe\xba\xbe':   # fat 头 (大端)
                   n = struct.unpack('>I', d[4:8])[0]
+                  out = []
                   for i in range(n):
                       cpu, sub, off, sz, al = struct.unpack('>iiIII', d[8+20*i:8+20*i+20])
-                      if cpu == 0x0100000C and sub == 2:
-                          base = off
-              else:
-                  base = 0 if struct.unpack('<i', d[4:8])[0] == 0x0100000C else None
-              if base is None:
-                  return None
+                      out.append((cpu, sub & 0xFFFFFFFF, off))
+                  return out
+              return [(struct.unpack('<i', d[4:8])[0], struct.unpack('<I', d[8:12])[0], 0)]
+          def abi_at(p, base):
+              d = open(p,'rb').read()
               sub = struct.unpack('<I', d[base+8:base+12])[0]
               ncmds = struct.unpack('<I', d[base+16:base+20])[0]
               o, minos = base + 32, None
@@ -197,11 +196,15 @@ jobs:
               return sub, minos
           ok = True
           for p in sys.argv[1:]:
-              r = abi(p)
               print(p)
-              if r is None:
+              sl = slices(p)
+              print('  切片表: ' + ', '.join('cpu=0x%08x sub=0x%08x' % (c, s) for c, s, o in sl))
+              # lipo 写 fat_arch 的 cpusubtype 可能是 0x2 (纯 arch) 也可能已带 0x80000000 标记,
+              # 统一按低字节==2 认作 arm64e, 真正的 ABI 版本以切片内层 Mach-O 头为准。
+              cand = [o for c, s, o in sl if c == 0x0100000C and (s & 0xFF) == 2]
+              if not cand:
                   print('  FATAL: 没有 arm64e 切片'); ok = False; continue
-              sub, minos = r
+              sub, minos = abi_at(p, cand[0])
               print('  arm64e cpusubtype=0x%08x minos=%d.%d' % (sub, (minos or 0) >> 16, ((minos or 0) >> 8) & 0xff))
               if not (sub & 0x80000000):
                   print('  FATAL: 旧 ABI(v1), iOS14+ 会拒绝/崩溃'); ok = False
