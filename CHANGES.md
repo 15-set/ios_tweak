@@ -143,3 +143,19 @@ Insulation-Mod/
    rootless/roothide 下另链接 libroot（与原 deb 的 libroot 引用一致）。
 6. **key 名拼写**：需求给定的开关 key 为 `chragingBatteryThermalProtect`（chraging 非 charging），
    已按原文实现，未擅自改名。
+
+## 7. CPU 模式生效路径定论（0.0.18 反汇编，决定"模拟低电频率"修复）
+
+1. 面板 `setPreferenceValue` 对 `thermalPowerMode` 连发两个 Darwin 通知：
+   `executePuppetEvent`（prefs 二进制 0x8a74）+ `restartThermalMonitor`（0x8b14）。
+2. daemon 内 `executePuppetEvent` handler（0x13364）→ `refreshOnce`（0xcc2c）；
+   0xcc40 `ldrb w8,[x20,#0x18]` / 0xcc44 `tbnz` —— 该函数每进程只首跑一次，之后空转。
+   即 daemon 存活期间 executePuppetEvent 不再改变档位。
+3. `restartThermalMonitor` handler（0x1343c → 0x137f0 → 闭包 0x13400）：
+   0.2s 后 `NSLog("insulation: restarting thermalmonitord after CPU mode change")`，
+   然后 `kill(getpid(), 15)` —— 0x13430 `mov w1,#0xf` = **SIGTERM**（非 SIGKILL）。
+   launchd 拉起新进程 → ctor → `initForFastLoop:` → refreshOnce 首跑 →
+   `applyAll`(0xc2d4) → `applyPowerMode`(0xbe04) → 新模式落地。
+4. 结论：**重启 daemon 就是原版的生效机制**，进程内重应用替代不了（实测：模拟低电频率点不动）。
+   重建版曾误改为"进程内重应用 + 重试表"并去掉自杀重启（且早前测试误用 SIGKILL），
+   现恢复为与原版逐位一致的 SIGTERM 重启；重启前 0.2s 窗口期仍进程内先应用一次作为兜底。

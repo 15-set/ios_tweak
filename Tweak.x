@@ -33,8 +33,9 @@
 #import <os/lock.h>
 #import <IOKit/IOKitLib.h>
 #import <dlfcn.h>          /* [BUILD-FIX-C] dlsym: SCPreferences* 在 iOS SDK 标记 unavailable, 改运行时取符号 */
-/* [FIX][SAFETY] 不再自杀重启 thermalmonitord; 保留 unistd.h 供 getpid/getuid/geteuid */
-#import <unistd.h>         /* [NEW] getpid/getuid/geteuid */
+/* [EVIDENCE] 恢复原版自杀重启: unistd.h 提供 kill/getpid, signal.h 提供 SIGTERM */
+#import <unistd.h>         /* getpid/getuid/geteuid */
+#import <signal.h>         /* [EVIDENCE] SIGTERM — 原版 0x13430: mov w1,#0xf */
 #import <stdarg.h>         /* [MODIFIED] va_list — InsDebugLog 改用 NSLog */
 
 /* [BUILD-FIX-A] 私有类前向声明: 与下方 @interface 并存合法, 双保险保证
@@ -969,26 +970,10 @@ static void InsReapplySoon(int attempt, NSString *tag);
 
 #pragma mark - 初始化  [UPSTREAM InsulationTInit + NEW]
 
-/* [FIX][SAFETY] 不再 kill thermalmonitord。
- *   [EVIDENCE] 原版对 -restartThermalMonitor 的真实做法 (0x13240 → 0x1343c → 0x137f0):
- *     DispatchQueue.global().asyncAfter(.now() + 0.2s) { 0x13400:
- *       NSLog("insulation: restarting thermalmonitord after CPU mode change");
- *       kill(getpid(), SIGKILL); }
- *   即在系统原生环境里靠 launchd 重新拉起 daemon, 由新的 initForFastLoop 应用档位。
- *   实测 (Dopamine 2.4.9.25 隐根 / iOS 15): kill(getpid(), SIGKILL) 后 launchd 没有把该 daemon
- *   拉起, `ps -A | grep thermalmonitord` 为空 → 热控进程缺失、日志为零、频率不降。
- *   结论: "SIGKILL + KeepAlive" 在本机不可靠, 安全优先, 彻底去掉自杀重启。
- *   替代: 进程内重应用, 延迟序列与原版 0xc8bc 的重试表一致 (0.25/1/2/4/6/8/10s),
- *   再配合 setCPULevel: 常驻钳制把 level 锁在 2。
- *   launchctl kickstart 的 label 需设备侧 `launchctl list | grep -i thermal` 取证;
- *   在未取证前不盲调外部 launchctl —— 避免再次把 daemon 停掉却拉不起来。
- *   [INFERRED] 进程内重应用能覆盖 daemon 内部状态: apply 直接调 MitigationController 的
- *   setPowerSaveActive:/setCPULevel:/updateCPU, 与 daemon 自身热循环走同一入口。
- */
-static BOOL gReapplyInProgress = NO;
-
 /* [EVIDENCE] 0xc8bc 的重试表: d8 = [0x29e28 + i + 0x28] (double),
- *   实测常量序列 0.25 / 1 / 2 / 4 / 6 / 8 / 10 秒。原版在每次 refresh 后按此序列补刀。 */
+ *   实测常量序列 0.25 / 1 / 2 / 4 / 6 / 8 / 10 秒。
+ *   原版在每次 refresh 后按此序列补刀 (handler 0x13364 / initForFastLoop 0xef84 均调 0xc8bc)。
+ *   本重建版保留于新进程启动路径 (initForFastLoop:), 与原版一致。 */
 static const double kInsReapplyDelays[] = {0.25, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0};
 
 static void InsReapplySoon(int attempt, NSString *tag) {
@@ -1007,39 +992,34 @@ static void InsReapplySoon(int attempt, NSString *tag) {
     });
 }
 
+/* [EVIDENCE] 恢复原版「切换 CPU 模式 → 重启 thermalmonitord」机制。
+ *
+ *   反汇编定论 (0.0.18 arm64 slice):
+ *   1) 面板侧: setPreferenceValue 对 thermalPowerMode 连发两个 Darwin 通知 ——
+ *      executePuppetEvent (prefs 二进制 0x8a74) 与 restartThermalMonitor (0x8b14)。
+ *   2) daemon 侧 executePuppetEvent handler (0x13364) → refreshOnce (0xcc2c):
+ *      0xcc40 ldrb w8,[x20,#0x18] / 0xcc44 tbnz → 每进程只首跑一次, 之后全是空转。
+ *      即 executePuppetEvent 在 daemon 存活期间基本不起作用。
+ *   3) daemon 侧 restartThermalMonitor handler (0x1343c → 0x137f0 → 闭包 0x13400):
+ *        DispatchQueue.global().asyncAfter(.now() + 0.2) {
+ *          NSLog("insulation: restarting thermalmonitord after CPU mode change");
+ *          kill(getpid(), 15);   // 0x13430: mov w1,#0xf → SIGTERM, 不是 SIGKILL(9)
+ *        }
+ *      launchd 拉起新进程 → ctor → initForFastLoop: → refreshOnce 首跑 →
+ *      applyAll(0xc2d4) → applyPowerMode(0xbe04) → 新模式在全新进程落地。
+ *   结论: 「重启 daemon」就是原版的生效路径, 进程内重应用替代不了它
+ *        (实测现象即"模拟低电频率点不动")。此处恢复原版行为, 逐位对齐 SIGTERM。 */
 static void InsOnRestartRequested(CFNotificationCenterRef center, void *observer, CFStringRef name,
                                   const void *object, CFDictionaryRef userInfo) {
-    NSString *path = InsPrefsPath();
-    NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:path];
-    if (!p) p = [NSDictionary dictionaryWithContentsOfFile:kInsPrefsPathRel];
-    NSString *raw = [p[kPrefPowerMode] isKindOfClass:[NSString class]] ? p[kPrefPowerMode] : @"off";
-
-    InsPowerMode target;
-    if ([raw isEqualToString:@"lowPower"])       target = InsPowerModeLowPower;
-    else if ([raw isEqualToString:@"fullPower"]) target = InsPowerModeFullPower;
-    else                                          target = InsPowerModeOff;
-
-    os_unfair_lock_lock(&gLock);
-    BOOL busy = gReapplyInProgress;
-    if (!busy) gReapplyInProgress = YES;
-    os_unfair_lock_unlock(&gLock);
-
-    if (busy) {
-        InsDebugLog(@"重应用请求忽略: 已有流程在进行");
-        return;
-    }
-
-    InsDebugLog(@"模式切换通知: 目标=%ld(%@), 改为进程内重应用(不重启 daemon)", (long)target, raw);
-
-    /* 先刷新 gPowerMode, 让 setCPULevel: hook 立即按新档位钳制, 再主动 apply 一次 */
+    /* 重启前窗口期先进程内应用一次 (无害, 若 relaunch 失败也有兜底) */
     InsReloadPrefs();
     InsApplyPowerMode();
-    InsReapplySoon(1, @"mode-change");
+    InsApplyAdvancedSwitches();
 
-    /* 0.5s 后释放去抖, 允许用户连续切换 */
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        os_unfair_lock_lock(&gLock); gReapplyInProgress = NO; os_unfair_lock_unlock(&gLock);
+        ILog(@"insulation: restarting thermalmonitord after CPU mode change");  /* [EVIDENCE] 原日志串原样 */
+        kill(getpid(), SIGTERM);   /* [EVIDENCE] 0x13430: w1 = 0xf = SIGTERM */
     });
 }
 
