@@ -380,18 +380,29 @@ static void InsApplyAdvancedSwitches(void) {
     BOOL suppress = gSuppressNotifications;
     BOOL pocket   = gDisablePocketSunlight;
     BOOL sunLock  = gSunlightLocked;
+    BOOL fullPower = (gPowerMode == InsPowerModeFullPower);
     os_unfair_lock_unlock(&gLock);
 
-    /* [INFERRED] 日志串: "thermalSuppressNotificationsEnabled: on -> %d" 等 */
-    InsSCSetValue(CFSTR("OSThermalNotificationEnabled"), suppress ? kCFBooleanFalse : kCFBooleanTrue);
-    InsSCSetValue(CFSTR("OSThermalNotificationPersistentlyEnabled"), suppress ? kCFBooleanFalse : kCFBooleanTrue);
+    /* [EVIDENCE] 0xc3d0..0xc450: fullPower ↔ "engageBehavior=false / engageBehaviorPersistentlyEnabled=true",
+     *           其他模式 → Reset (移除两个键)。对应日志 "thermalPowerMode fullPower -> thermal mitigations disabled (%d)"。
+     *           [EVIDENCE] 0x13f64 insulationSetThermalMitigationsEnabled 的写键为 engageBehavior/engageBehaviorPersistentlyEnabled。 */
+    InsSCSetValue(CFSTR("engageBehavior"), fullPower ? kCFBooleanFalse : NULL);
+    InsSCSetValue(CFSTR("engageBehaviorPersistentlyEnabled"), fullPower ? kCFBooleanTrue : NULL);
+
+    /* [EVIDENCE] SetOSNotifEnabled 写键: OSThermalNotificationEnabled / OSThermalNotificationPersistentlyEnabled;
+     *           开启分支实参 (0,1) → 键值 (false, true); 关闭分支走 Reset(移除)。 */
+    InsSCSetValue(CFSTR("OSThermalNotificationEnabled"), suppress ? kCFBooleanFalse : NULL);
+    InsSCSetValue(CFSTR("OSThermalNotificationPersistentlyEnabled"), suppress ? kCFBooleanTrue : NULL);
     ILog(@"thermalSuppressNotificationsEnabled: %@ -> %d", suppress ? @"on" : @"off", suppress);
 
+    /* [EVIDENCE] SetHIPEnabled 写键: hipOverride / hipPersistentlyEnabled, 实参 (0,1) → (false, true);
+     *           随后 SetSimulateHIPEnabled 写 simulateHip=false; 关闭分支 ResetHIP + ResetSimulateHIP。 */
     InsSCSetValue(CFSTR("hipOverride"), pocket ? kCFBooleanFalse : NULL);
-    InsSCSetValue(CFSTR("hipPersistentlyEnabled"), pocket ? kCFBooleanFalse : NULL);
+    InsSCSetValue(CFSTR("hipPersistentlyEnabled"), pocket ? kCFBooleanTrue : NULL);
     InsSCSetValue(CFSTR("simulateHip"), pocket ? kCFBooleanFalse : NULL);
     ILog(@"thermalDisablePocketSunlightEnabled: %@ -> %d/%d", pocket ? @"on" : @"off", pocket, 0);
 
+    /* [EVIDENCE] SetSunlightOverride 写键: sunlightOverride / sunlightOverridePersistentlyEnabled, 实参 (1,1) → (true, true)。 */
     InsSCSetValue(CFSTR("sunlightOverride"), sunLock ? kCFBooleanTrue : NULL);
     InsSCSetValue(CFSTR("sunlightOverridePersistentlyEnabled"), sunLock ? kCFBooleanTrue : NULL);
     ILog(@"thermalSunlightLockedEnabled: %@ -> %d", sunLock ? @"on" : @"off", sunLock);
@@ -523,6 +534,25 @@ static void InsFallbackApply(int attempt) {
     });
 }
 
+#pragma mark - [EVIDENCE] 热抑制判定 (对应 0.0.18 CommonProduct 手装 hook 的公共守卫)
+
+/*
+ * [EVIDENCE] 0.0.18 arm64 slice:
+ *   - 0x14174 objc_getClass("CommonProduct") 之后逐个 class_getInstanceMethod + method_setImplementation,
+ *     共安装 15 个方法 (见下方 Hook 1 新增段)。
+ *   - 每个方法开头调用两个辅助函数:
+ *       0x14e14 → 读 com.be-huge.insulation-prefs.plist 的 thermalPreventDimmingEnabled(bool)
+ *       0x14ea0 → 同一 plist 的 thermalPowerMode == "fullPower"
+ *     即公共守卫 = 防暗屏开关 || fullPower 模式。
+ */
+static BOOL InsShouldSuppressThermal(void) {
+    os_unfair_lock_lock(&gLock);
+    BOOL dim  = gPreventDimming;
+    BOOL full = (gPowerMode == InsPowerModeFullPower);
+    os_unfair_lock_unlock(&gLock);
+    return dim || full;
+}
+
 #pragma mark - Hook 1: CommonProduct  [UPSTREAM, 与上游 Tweak.x.swift 一致]
 
 %hook CommonProduct
@@ -544,16 +574,127 @@ static void InsFallbackApply(int attempt) {
 - (void)handleMCSThermalPressure { /* swallow */ }
 
 /* [EVIDENCE] selector setThermalState: + 日志串 "insulation thermal state %@ -> Darwin pressure %d (%d)"
- * [INFERRED] fullPower 模式下拦截热状态广播, 向 Darwin 通知压为 normal, 不走原生 */
+ * [EVIDENCE] 手装 hook 0x1451c 的判定: 防暗屏开 → 不调原生; 否则 fullPower 且 state!=0 → 不调原生;
+ *           其余(含 fullPower + state==0) → 调原生。 */
 - (void)setThermalState:(int)state {
-    InsPowerMode mode;
-    os_unfair_lock_lock(&gLock); mode = gPowerMode; os_unfair_lock_unlock(&gLock);
-    if (mode == InsPowerModeFullPower) {
+    os_unfair_lock_lock(&gLock);
+    BOOL dim  = gPreventDimming;
+    BOOL full = (gPowerMode == InsPowerModeFullPower);
+    os_unfair_lock_unlock(&gLock);
+
+    if (full && state != 0) {
         ILog(@"insulation thermal state %@ -> Darwin pressure %d (%d)", @(state), 0, 0);
         notify_set_state(gRuntimeStateToken, 0);
         notify_post("com.apple.system.thermalpressurelevel");  /* kOSThermalNotificationPressureLevelName 值, 二进制字符串为证 */
         return;
     }
+    if (dim) return;
+    %orig;
+}
+
+/* ===== [EVIDENCE] 以下 14 个方法为 0.0.18 在 CommonProduct 上额外手装的 hook
+ *       (注册点 0x14174 objc_getClass("CommonProduct") → 0x144b8..0x14dc4 的 block)。
+ *       守卫统一为 InsShouldSuppressThermal() (= 防暗屏 || fullPower), 行为按各 block 反汇编实现。 */
+
+/* 0x144b8: 抑制热压力档位 */
+- (int)thermalPressureLevel {
+    if (InsShouldSuppressThermal()) return 0;
+    return %orig;
+}
+
+/* 0x14590: 抑制潜在强制压力档位 */
+- (BOOL)getPotentialForcedThermalPressureLevel {
+    if (InsShouldSuppressThermal()) return NO;
+    return %orig;
+}
+
+/* 0x145f4: 抑制潜在强制热档位 */
+- (id)getPotentialForcedThermalLevel:(id)a3 {
+    if (InsShouldSuppressThermal()) return nil;
+    return %orig;
+}
+
+/* 0x14684: 强制把看门狗上报参数改为 NO, 但仍调用原生 */
+- (void)thermalUpdatesToWatchdogEnabled:(BOOL)enabled {
+    if (InsShouldSuppressThermal()) { %orig(NO); return; }
+    %orig;
+}
+
+/* 0x14704: fullPower/防暗屏时改写热配置字典 (对应原版"解除温控"的核心运行时补丁)
+ *   键表 (0x24dc0..0x24f40) 与取值 (false/0/50000=0xC350) 均来自反汇编。
+ *   防暗屏为真时额外压掉 3 个显示相关键。 */
+- (id)getConfigurationFor:(id)a3 {
+    id cfg = %orig;
+    os_unfair_lock_lock(&gLock);
+    BOOL dim  = gPreventDimming;
+    BOOL full = (gPowerMode == InsPowerModeFullPower);
+    os_unfair_lock_unlock(&gLock);
+    if ((!dim && !full) || ![cfg isKindOfClass:[NSDictionary class]]) return cfg;
+
+    NSMutableDictionary *d = [cfg mutableCopy];
+    if (dim) {
+        d[@"needsPushingTSFDtoDisplayDriver"] = @NO;
+        d[@"displayBrightnessMitigation"]     = @NO;
+        d[@"displayMitigation"]               = @NO;
+    }
+    d[@"needsContextualClamp"]            = @NO;
+    d[@"shouldEnforceLightThermalPressure"] = @NO;
+    d[@"shouldEnforceThermalPressure"]     = @NO;
+    d[@"thermalPressureMitigation"]        = @NO;
+    d[@"performanceMitigation"]            = @NO;
+    d[@"CPMSMitigationState"]              = @0;
+    d[@"CPMSMitigationLevel"]              = @0;
+    d[@"forcedThermalLevel"]               = @0;
+    d[@"maxPower"]                         = @50000;
+    d[@"packagePowerTarget"]               = @50000;
+    return d;
+}
+
+/* 0x149f8 / 0x14a88 / 0x14b18: 吞掉热建议与热缓解决策, 返回 nil */
+- (id)getThermalSuggestion:(id)a3 {
+    if (InsShouldSuppressThermal()) return nil;
+    return %orig;
+}
+- (id)thermalSuggestion:(id)a3 {
+    if (InsShouldSuppressThermal()) return nil;
+    return %orig;
+}
+- (id)thermalMitigation:(id)a3 {
+    if (InsShouldSuppressThermal()) return nil;
+    return %orig;
+}
+
+/* 0x14ba8: 热压力决策改回 @0 (注意是 NSNumber 0, 不是 nil) */
+- (id)thermalPressure:(id)a3 {
+    if (InsShouldSuppressThermal()) return @0;
+    return %orig;
+}
+
+/* 0x14c3c: DVD1 档位强制 0, 仍调用原生 */
+- (void)setDVD1Level:(int)level {
+    if (InsShouldSuppressThermal()) { %orig(0); return; }
+    %orig;
+}
+
+/* 0x14ca0: CPMS 缓解开关 (防暗屏→NO; fullPower→NO; 否则原值) */
+- (void)setCPMSMitigationsEnabled:(BOOL)enabled {
+    if (InsShouldSuppressThermal()) { %orig(NO); return; }
+    %orig;
+}
+
+/* 0x14d0c: 最大封装功耗抬到 0xC350(50000), 仍调用原生 */
+- (void)setMaxPackagePower:(int)power {
+    if (InsShouldSuppressThermal()) { %orig(50000); return; }
+    %orig;
+}
+
+/* 0x14d74 / 0x14dc4: 低功耗目标 / 功率区目标 直接吞掉 */
+- (void)setPackageLowPowerTarget:(int)target {
+    if (InsShouldSuppressThermal()) return;
+    %orig;
+}
+- (void)setPackagePowerZoneTarget:(int)target {
+    if (InsShouldSuppressThermal()) return;
     %orig;
 }
 
