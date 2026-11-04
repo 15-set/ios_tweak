@@ -556,23 +556,44 @@ static BOOL InsShouldSuppressThermal(void) {
 
 #pragma mark - Hook 1: CommonProduct  [UPSTREAM, 与上游 Tweak.x.swift 一致]
 
+/* [FIX-CHARGING] 以下"吞事件/改热配置"类 hook 原先无条件生效, 是充不进电的直接原因:
+ *   它们与 CPU 模式无关, 却在 off/lowPower 下也持续拦截电池温度事件与 CPMS 数据。
+ *   现统一加上 InsShouldSuppressThermal() 守卫 —— 只在 fullPower(解除温控) 或
+ *   用户主动开"防止温控暗屏"时才生效, 其余模式完全直通原生。 */
+
 %hook CommonProduct
 
-/* [UPSTREAM] 捕获 CommonProduct 实例并把热模拟模式钉在 nominal */
+/* [UPSTREAM] 捕获 CommonProduct 实例并把热模拟模式钉在 nominal
+ * [FIX-CHARGING] 热模拟只在解除温控时才有意义; off/lowPower 下必须保持原生。 */
 - (id)initProduct:(id)arg1 {
     id res = %orig;
     gCommonProduct = self;
-    [self putDeviceInThermalSimulationMode:@"nominal"];
+    if (InsShouldSuppressThermal()) {
+        [self putDeviceInThermalSimulationMode:@"nominal"];
+    }
     return res;
 }
 
-/* [UPSTREAM] 吞掉热决策动作 / 轻度压力模拟 / powerzone 遥测上报 */
-- (void)tryTakeAction { /* swallow */ }
-- (void)simulateLightThermalPressure { /* swallow */ }
-- (void)updatePowerzoneTelemetry { /* swallow */ }
+/* [UPSTREAM] 吞掉热决策动作 / 轻度压力模拟 / powerzone 遥测上报
+ * [FIX-CHARGING] 同样只在解除温控时吞; 否则直通原生。 */
+- (void)tryTakeAction {
+    if (InsShouldSuppressThermal()) return;
+    %orig;
+}
+- (void)simulateLightThermalPressure {
+    if (InsShouldSuppressThermal()) return;
+    %orig;
+}
+- (void)updatePowerzoneTelemetry {
+    if (InsShouldSuppressThermal()) return;
+    %orig;
+}
 
 /* [EVIDENCE] selector 存在于二进制; [INFERRED] 同样吞掉 MCS 热压力处理 */
-- (void)handleMCSThermalPressure { /* swallow */ }
+- (void)handleMCSThermalPressure {
+    if (InsShouldSuppressThermal()) return;
+    %orig;
+}
 
 /* [EVIDENCE] selector setThermalState: + 日志串 "insulation thermal state %@ -> Darwin pressure %d (%d)"
  * [EVIDENCE] 手装 hook 0x1451c 的判定: 防暗屏开 → 不调原生; 否则 fullPower 且 state!=0 → 不调原生;
@@ -703,27 +724,27 @@ static BOOL InsShouldSuppressThermal(void) {
 
 #pragma mark - Hook 2: HidSensors  [UPSTREAM + NEW 电池温控放行点]
 
-/*
- * ★★★ 电池温控的唯一放行点 ★★★
- * 原插件在此吞掉所有 HID 温度传感器事件(空实现, [UPSTREAM] 逐行一致),
- * 因此 SOC(CPU 温控输入) 与电池温度事件在同一处被拦截。
- * [NEW] 开关打开(gBatteryThermalReleased=YES) 时: 仅当该事件来自电池传感器,
- *       调用 %orig 放行 —— 电池温控永久交还苹果原生策略, 不看充电状态/温度。
- *       开关关闭时恒为 NO → 与原版逐字等价; CPU 相关事件任何情况下都不放行。
- */
+/* [FIX-CHARGING] 原先无条件吞掉全部温度事件 —— 电池温度也被拦, CPMS 拿不到电池温度
+ *   → 插线后不充电 / 电流无反应, 这是"充不进电"的头号原因。
+ *   现改为:
+ *     · 「电池原生温控」开关打开 且 事件来自电池传感器 → 永远放行(用户显式要求)
+ *     · fullPower / 防暗屏 → 才吞掉(解除温控, 原版语义)
+ *     · 其余模式(off / lowPower) → 直通原生, 充电与温控完全不受影响 */
 %hook HidSensors
 
 - (void)handleTemperatureEvent:(int)temp service:(id)service {
     os_unfair_lock_lock(&gLock);
-    BOOL released = gBatteryThermalReleased;   // [NEW] 开关关闭时恒为 NO → 与原版逐字节等价
+    BOOL released = gBatteryThermalReleased;
     os_unfair_lock_unlock(&gLock);
 
     if (released && InsIsBatteryThermalService(service)) {
-        %orig;   // [NEW] 只放行电池传感器事件, 让 thermalmonitord 原生逻辑收到电池温度
+        %orig;   // 电池温控交还原生: 电池传感器事件一律放行
         return;
     }
-    /* [UPSTREAM] 原实现: 空函数, 吞掉温度事件 */
-    return;
+    if (InsShouldSuppressThermal()) {
+        return;  // 解除温控模式: 吞掉温度事件
+    }
+    %orig;       // 其他模式: 直通原生, 不干扰充电
 }
 
 %end
@@ -793,9 +814,12 @@ static NSDictionary *InsPatchThermalPlist(NSDictionary *origObj) {
 
 %hook NSDictionary
 
+/* [FIX-CHARGING] 该 patch 会把 thermal plist 的 expectsCPMSSupport 改为 0 并拉平背光数组,
+ *   直接改动 CPMS(充电/功耗管理)配置。原先无条件生效 → 充电异常。
+ *   现只在 fullPower / 防暗屏时 patch, 其他模式返回原生字典, 完全不碰充电配置。 */
 + (id)dictionaryWithContentsOfFile:(NSString *)path {
     id res = %orig;
-    if ([path containsString:@"/System/Library/ThermalMonitor/"]) {
+    if (InsShouldSuppressThermal() && [path containsString:@"/System/Library/ThermalMonitor/"]) {
         if ([res isKindOfClass:[NSDictionary class]]) {
             return InsPatchThermalPlist(res);
         }
