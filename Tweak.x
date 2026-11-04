@@ -29,13 +29,13 @@
  */
 
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>    /* [DIAG] objc_getClass / class_getInstanceMethod / method_getImplementation */
 #import <notify.h>
 #import <os/lock.h>
 #import <IOKit/IOKitLib.h>
 #import <dlfcn.h>          /* [BUILD-FIX-C] dlsym: SCPreferences* 在 iOS SDK 标记 unavailable, 改运行时取符号 */
-/* [EVIDENCE] 恢复原版自杀重启: unistd.h 提供 kill/getpid, signal.h 提供 SIGTERM */
+/* [ROLLBACK] 已放弃自杀重启; unistd.h 仅供 getpid/getuid/geteuid */
 #import <unistd.h>         /* getpid/getuid/geteuid */
-#import <signal.h>         /* [EVIDENCE] SIGTERM — 原版 0x13430: mov w1,#0xf */
 #import <stdarg.h>         /* [MODIFIED] va_list — InsDebugLog 改用 NSLog */
 
 /* [BUILD-FIX-A] 私有类前向声明: 与下方 @interface 并存合法, 双保险保证
@@ -992,35 +992,23 @@ static void InsReapplySoon(int attempt, NSString *tag) {
     });
 }
 
-/* [EVIDENCE] 恢复原版「切换 CPU 模式 → 重启 thermalmonitord」机制。
+/* [ROLLBACK][SAFETY] 撤销 SIGTERM 自杀重启。
  *
- *   反汇编定论 (0.0.18 arm64 slice):
- *   1) 面板侧: setPreferenceValue 对 thermalPowerMode 连发两个 Darwin 通知 ——
- *      executePuppetEvent (prefs 二进制 0x8a74) 与 restartThermalMonitor (0x8b14)。
- *   2) daemon 侧 executePuppetEvent handler (0x13364) → refreshOnce (0xcc2c):
- *      0xcc40 ldrb w8,[x20,#0x18] / 0xcc44 tbnz → 每进程只首跑一次, 之后全是空转。
- *      即 executePuppetEvent 在 daemon 存活期间基本不起作用。
- *   3) daemon 侧 restartThermalMonitor handler (0x1343c → 0x137f0 → 闭包 0x13400):
- *        DispatchQueue.global().asyncAfter(.now() + 0.2) {
- *          NSLog("insulation: restarting thermalmonitord after CPU mode change");
- *          kill(getpid(), 15);   // 0x13430: mov w1,#0xf → SIGTERM, 不是 SIGKILL(9)
- *        }
- *      launchd 拉起新进程 → ctor → initForFastLoop: → refreshOnce 首跑 →
- *      applyAll(0xc2d4) → applyPowerMode(0xbe04) → 新模式在全新进程落地。
- *   结论: 「重启 daemon」就是原版的生效路径, 进程内重应用替代不了它
- *        (实测现象即"模拟低电频率点不动")。此处恢复原版行为, 逐位对齐 SIGTERM。 */
+ *   0.0.18 原版确实靠 restartThermalMonitor → 0.2s 后 kill(getpid(), 15) 重启 daemon
+ *   来让新模式落地 (0x13400 闭包 / 0x13430 `mov w1,#0xf`)。
+ *   但真机实测 (Dopamine 2.4.9.25 隐根 / iOS 15): thermalmonitord 收到 SIGTERM 退出后,
+ *   launchd 没有把该 daemon 拉起 —— 直接后果是
+ *     · 热控进程缺失 → "模拟低电频率"看起来毫无变化 (实际是没有服务在调档)
+ *     · CPMS/充电管理随之停摆 → 插线充电电流无反应、充不进电
+ *   这是不可接受的风险, 因此永久放弃"杀 daemon"这条路, 改为纯进程内应用。
+ *   [EVIDENCE] 类内应用入口与原版 applyPowerMode(0xbe04) 逐指令一致, 无需重启即可下发档位。 */
 static void InsOnRestartRequested(CFNotificationCenterRef center, void *observer, CFStringRef name,
                                   const void *object, CFDictionaryRef userInfo) {
-    /* 重启前窗口期先进程内应用一次 (无害, 若 relaunch 失败也有兜底) */
+    ILog(@"模式切换通知到达: 进程内重应用 (不重启 daemon)");
     InsReloadPrefs();
     InsApplyPowerMode();
     InsApplyAdvancedSwitches();
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        ILog(@"insulation: restarting thermalmonitord after CPU mode change");  /* [EVIDENCE] 原日志串原样 */
-        kill(getpid(), SIGTERM);   /* [EVIDENCE] 0x13430: w1 = 0xf = SIGTERM */
-    });
+    InsReapplySoon(1, @"mode-change");   /* 0.25/1/2/4/6/8/10s 补刀, 与原版重试表一致 */
 }
 
 static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -1098,6 +1086,35 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
          * [B] 再叠加 2s 定时兜底(最多 5 次): 即使 initForFastLoop: 未命中也能补 apply。 */
         InsApplyPowerMode();
         InsFallbackApply(1);
+
+        /* [DIAG] hook 前置条件自检: %hook 是运行时按类名安装的, 类找不到 → 静默失败,
+         *   表现为"面板点了没反应"。把三个关键类 + controller 实例打到 Console,
+         *   即可一次判断是「类不存在」还是「通知没到」还是「apply 被 nil 短路」。 */
+        Class mcCls  = objc_getClass("MitigationController");
+        Class cpCls  = objc_getClass("CommonProduct");
+        Class hidCls = objc_getClass("HidSensors");
+        Sel selCPU   = @selector(setCPULevel:);
+        IMP impCPU   = mcCls ? method_getImplementation(class_getInstanceMethod(mcCls, selCPU)) : NULL;
+        ILog(@"DIAG 类自检: MitigationController=%p CommonProduct=%p HidSensors=%p",
+             (void *)mcCls, (void *)cpCls, (void *)hidCls);
+        ILog(@"DIAG hook 自检: MitigationController.setCPULevel: IMP=%p mc实例=%p",
+             (void *)impCPU, (void *)(__bridge void *)gMitigationController);
+        ILog(@"DIAG 当前模式=%ld (0=off 1=lowPower 2=fullPower) pref路径=%@",
+             (long)gPowerMode, InsPrefsPath());
+
+        /* [DIAG] 10s 后再报一次 controller 绑定情况 —— 若这里仍是 nil,
+         *   说明 MitigationController 的 hook 在本机型上没命中, 必须换安装方式。 */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            os_unfair_lock_lock(&gLock);
+            MitigationController *mc = gMitigationController;
+            InsPowerMode m = gPowerMode;
+            os_unfair_lock_unlock(&gLock);
+            ILog(@"DIAG 10s: mc=%p mode=%ld CPULevel=%@ powerSave=%@",
+                 (void *)(__bridge void *)mc, (long)m,
+                 mc ? @([mc CPULevel]) : @"n/a",
+                 mc ? @([mc powerSaveActive]) : @"n/a");
+        });
 
         os_unfair_lock_lock(&gLock);
         InsPowerMode startupMode = gPowerMode;
