@@ -1093,12 +1093,12 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
         Class mcCls  = objc_getClass("MitigationController");
         Class cpCls  = objc_getClass("CommonProduct");
         Class hidCls = objc_getClass("HidSensors");
-        Sel selCPU   = @selector(setCPULevel:);
+        SEL selCPU   = @selector(setCPULevel:);
         IMP impCPU   = mcCls ? method_getImplementation(class_getInstanceMethod(mcCls, selCPU)) : NULL;
         ILog(@"DIAG 类自检: MitigationController=%p CommonProduct=%p HidSensors=%p",
-             (void *)mcCls, (void *)cpCls, (void *)hidCls);
+             (__bridge void *)mcCls, (__bridge void *)cpCls, (__bridge void *)hidCls);
         ILog(@"DIAG hook 自检: MitigationController.setCPULevel: IMP=%p mc实例=%p",
-             (void *)impCPU, (void *)(__bridge void *)gMitigationController);
+             (void *)impCPU, (__bridge void *)gMitigationController);
         ILog(@"DIAG 当前模式=%ld (0=off 1=lowPower 2=fullPower) pref路径=%@",
              (long)gPowerMode, InsPrefsPath());
 
@@ -1111,7 +1111,7 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
             InsPowerMode m = gPowerMode;
             os_unfair_lock_unlock(&gLock);
             ILog(@"DIAG 10s: mc=%p mode=%ld CPULevel=%@ powerSave=%@",
-                 (void *)(__bridge void *)mc, (long)m,
+                 (__bridge void *)mc, (long)m,
                  mc ? @([mc CPULevel]) : @"n/a",
                  mc ? @([mc powerSaveActive]) : @"n/a");
         });
