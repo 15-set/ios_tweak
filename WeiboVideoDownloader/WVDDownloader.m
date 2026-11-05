@@ -101,6 +101,7 @@ static NSString *WVDQualityDescription(NSInteger quality) {
 
 - (void)_beginDownloadWithCandidate:(WVDVideoCandidate *)candidate;
 - (void)_beginHLSExportWithCandidate:(WVDVideoCandidate *)candidate;
+- (void)_exportAsset:(AVAsset *)asset;
 - (void)_saveVideoToPhotoLibrary:(NSURL *)fileURL;
 - (void)_handleAuthorizationStatus:(PHAuthorizationStatus)status fileURL:(NSURL *)fileURL;
 - (void)_showInfoWithTitle:(NSString *)title detail:(NSString *)detail autoDismiss:(BOOL)autoDismiss;
@@ -145,11 +146,25 @@ static NSString *WVDQualityDescription(NSInteger quality) {
         }
 
         [self _showInfoWithTitle:@"开始下载"
-                           detail:[NSString stringWithFormat:@"正在后台下载视频（%@），完成后会自动保存到相册。",
+                           detail:[NSString stringWithFormat:@"%@ · 完成后自动存入相册",
                                    WVDQualityDescription(candidate.quality)]
                       autoDismiss:YES];
 
         [self _beginDownloadWithCandidate:candidate];
+    });
+}
+
+- (void)startDownloadWithAsset:(AVAsset *)asset {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!WVDIsEnabled()) return;
+
+        if (asset == nil) {
+            [self _showFailureWithDetail:@"没拿到播放器资源，请先播放视频。"];
+            return;
+        }
+
+        [self _showInfoWithTitle:@"开始下载" detail:@"正在导出视频…" autoDismiss:YES];
+        [self _exportAsset:asset];
     });
 }
 
@@ -232,6 +247,15 @@ static NSString *WVDQualityDescription(NSInteger quality) {
     }
 
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:candidate.url options:options];
+    [self _exportAsset:asset];
+}
+
+/// 把任意 AVAsset（含播放器正在播的 HLS/自定义资源）导出为本地 mp4
+- (void)_exportAsset:(AVAsset *)asset {
+    if (asset == nil) {
+        [self _showFailureWithDetail:@"没有拿到视频资源"];
+        return;
+    }
 
     NSString *fileName = [NSString stringWithFormat:@"wvd_%@.mp4", [NSUUID UUID].UUIDString];
     NSURL *outputURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:fileName]];
@@ -245,11 +269,12 @@ static NSString *WVDQualityDescription(NSInteger quality) {
     AVAssetExportSession *session = [AVAssetExportSession exportSessionWithAsset:asset
                                                                      presetName:preset];
     if (session == nil) {
-        [self _showFailureWithDetail:@"无法创建 HLS 导出任务"];
+        [self _showFailureWithDetail:@"无法导出该视频"];
         return;
     }
     session.outputURL = outputURL;
     session.outputFileType = AVFileTypeMPEG4;
+    session.shouldOptimizeForNetworkUse = NO;
 
     __weak typeof(self) weakSelf = self;
     [session exportAsynchronouslyWithCompletionHandler:^{
@@ -260,7 +285,7 @@ static NSString *WVDQualityDescription(NSInteger quality) {
             if (session.status == AVAssetExportSessionStatusCompleted) {
                 [strongSelf _saveVideoToPhotoLibrary:outputURL];
             } else {
-                [strongSelf _showFailureWithDetail:[NSString stringWithFormat:@"HLS 转换 MP4 失败（status=%ld）",
+                [strongSelf _showFailureWithDetail:[NSString stringWithFormat:@"导出失败（code=%ld）",
                                                      (long)session.status]];
             }
         });

@@ -66,6 +66,16 @@ static volatile NSInteger gWVDHookMode = WVDHookModeFull;
 static UIWindow *gWVDDebugWindow = nil;
 static UIButton *gWVDBadge = nil;
 
+@class WVDPlayerOverlay;
+
+/// 下载按钮与调试条共用同一个全屏透明窗口
+static UIWindow *gWVDOverlayWindow = nil;
+static UIButton *gWVDOverlayButton = nil;
+static CFAbsoluteTime gWVDOverlayStamp = 0;
+static NSTimer *gWVDOverlayTimer = nil;
+/// 最近一次布局的播放器，按钮兜底时直接从它的 currentItem 取 AVAsset
+static __weak AVPlayer *gWVDLastPlayer = nil;
+
 static void WVDSetupDebug(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -151,25 +161,50 @@ static void WVDMarkEvent(NSString *event) {
 
 static void WVDUpdateDebugBadge(void);
 
+/// 空白区域不拦截触摸，只有调试条和下载按钮本身能点，不挡微博页面操作
+@interface WVDPassThroughView : UIView
+@end
+
+@implementation WVDPassThroughView
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
+}
+
+@end
+
+@interface WVDPassThroughController : UIViewController
+@end
+
+@implementation WVDPassThroughController
+
+- (void)loadView {
+    self.view = [[WVDPassThroughView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.view.backgroundColor = [UIColor clearColor];
+}
+
+@end
+
+/// 调试条和下载按钮放在同一个全屏透明窗口里，保证两者可见性一致
 static void WVDEnsureDebugWindow(void) {
     if (gWVDDebugWindow != nil) return;
 
     UIWindowScene *scene = WVDActiveWindowScene();
     if (scene == nil) return;
 
-    CGFloat badgeWidth = scene.coordinateSpace.bounds.size.width - 12.0;
+    CGRect bounds = scene.coordinateSpace.bounds;
+    CGFloat buttonWidth = 52.0;
+    CGFloat buttonHeight = 26.0;
 
     UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
-    window.frame = CGRectMake(6, 60, badgeWidth, 22);
+    window.frame = bounds;
     window.windowLevel = UIWindowLevelAlert + 1;
     window.backgroundColor = [UIColor clearColor];
-
-    UIViewController *root = [[UIViewController alloc] init];
-    root.view.backgroundColor = [UIColor clearColor];
-    window.rootViewController = root;
+    window.rootViewController = [[WVDPassThroughController alloc] init];
 
     UIButton *badge = [UIButton buttonWithType:UIButtonTypeCustom];
-    badge.frame = CGRectMake(0, 0, badgeWidth, 22);
+    badge.frame = CGRectMake(6, 60, bounds.size.width - 12.0 - buttonWidth - 8.0, 22);
     badge.titleLabel.font = [UIFont systemFontOfSize:8.0 weight:UIFontWeightMedium];
     badge.titleLabel.adjustsFontSizeToFitWidth = YES;
     badge.titleLabel.minimumScaleFactor = 0.6;
@@ -180,12 +215,30 @@ static void WVDEnsureDebugWindow(void) {
     [badge addTarget:[WVDDebugBadge class]
                action:@selector(toggleMode:)
      forControlEvents:UIControlEventTouchUpInside];
-    [root.view addSubview:badge];
+    [window.rootViewController.view addSubview:badge];
+
+    UIButton *download = [UIButton buttonWithType:UIButtonTypeCustom];
+    download.frame = CGRectMake(bounds.size.width - buttonWidth - 10.0, 58.0,
+                                buttonWidth, buttonHeight);
+    download.tag = kWVDDownButtonTag;
+    download.titleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
+    [download setTitle:@"下载" forState:UIControlStateNormal];
+    [download setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    download.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
+    download.layer.cornerRadius = 13.0;
+    download.layer.masksToBounds = YES;
+    download.hidden = YES;
+    [download addTarget:[WVDPlayerOverlay class]
+                 action:@selector(handleTap:)
+       forControlEvents:UIControlEventTouchUpInside];
+    [window.rootViewController.view addSubview:download];
 
     window.hidden = NO;
 
     gWVDDebugWindow = window;
     gWVDBadge = badge;
+    gWVDOverlayButton = download;
+    gWVDOverlayWindow = window;
 
     WVDUpdateDebugBadge();
 }
@@ -240,14 +293,6 @@ static void WVDLogInterestingURL(NSURL *url) {
 
 @end
 
-/// 按钮放在一个独立的高层浮窗里：不依赖播放器视图内部层级，
-/// 微博把播放器盖在哪个子视图上都不影响按钮显示。
-/// 窗口本身只有按钮大小，不会挡住页面其它区域的点击。
-static UIWindow *gWVDOverlayWindow = nil;
-static UIButton *gWVDOverlayButton = nil;
-static CFAbsoluteTime gWVDOverlayStamp = 0;
-static NSTimer *gWVDOverlayTimer = nil;
-
 @implementation WVDPlayerOverlay
 
 /// 播放器页面出现时调用（AVPlayerLayer 每次布局都会调）
@@ -258,86 +303,49 @@ static NSTimer *gWVDOverlayTimer = nil;
         return;
     }
 
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self showOverlay];
-        });
-        return;
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        WVDEnsureDebugWindow();
+        if (gWVDOverlayButton == nil) return;
 
-    UIWindowScene *scene = WVDActiveWindowScene();
-    if (scene == nil) return;
-
-    CGFloat width = 52.0;
-    CGFloat height = 26.0;
-    CGFloat inset = 10.0;
-
-    CGRect screenBounds = scene.coordinateSpace.bounds;
-    CGFloat top = inset;
-    for (UIWindow *window in scene.windows) {
-        if (window.isKeyWindow) {
-            top += window.safeAreaInsets.top;
-            break;
+        if (gWVDOverlayButton.hidden) {
+            gWVDOverlayButton.hidden = NO;
+            WVDMarkEvent(@"overlay on");
         }
-    }
+        gWVDOverlayStamp = CFAbsoluteTimeGetCurrent();
 
-    if (gWVDOverlayWindow == nil) {
-        UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
-        window.windowLevel = UIWindowLevelAlert + 1;
-        window.backgroundColor = [UIColor clearColor];
-
-        UIViewController *root = [[UIViewController alloc] init];
-        root.view.backgroundColor = [UIColor clearColor];
-        window.rootViewController = root;
-
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-        button.tag = kWVDDownButtonTag;
-        button.titleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
-        [button setTitle:@"下载" forState:UIControlStateNormal];
-        [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        button.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-        button.layer.cornerRadius = 13.0;
-        button.layer.masksToBounds = YES;
-        [button addTarget:[WVDPlayerOverlay class]
-                   action:@selector(handleTap:)
-         forControlEvents:UIControlEventTouchUpInside];
-        [root.view addSubview:button];
-
-        gWVDOverlayWindow = window;
-        gWVDOverlayButton = button;
-    }
-
-    gWVDOverlayButton.frame = CGRectMake(0, 0, width, height);
-    gWVDOverlayWindow.frame = CGRectMake(screenBounds.size.width - width - inset, top, width, height);
-    if (gWVDOverlayWindow.hidden) {
-        WVDMarkEvent([NSString stringWithFormat:@"overlay on %.0fx%.0f", screenBounds.size.width, screenBounds.size.height]);
-    }
-    gWVDOverlayWindow.hidden = NO;
-
-    gWVDOverlayStamp = CFAbsoluteTimeGetCurrent();
-
-    // 15 秒内没有新的播放器布局就自动隐藏，避免按钮残留在其它页面
-    if (gWVDOverlayTimer == nil) {
-        gWVDOverlayTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
-                                                          repeats:YES
-                                                            block:^(NSTimer *timer) {
-            if (CFAbsoluteTimeGetCurrent() - gWVDOverlayStamp > 15.0) {
-                gWVDOverlayWindow.hidden = YES;
-            }
-        }];
-    }
+        // 6 秒内没有新的播放器布局就自动隐藏，避免按钮残留在其它页面
+        if (gWVDOverlayTimer == nil) {
+            gWVDOverlayTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
+                                                              repeats:YES
+                                                                block:^(NSTimer *timer) {
+                if (CFAbsoluteTimeGetCurrent() - gWVDOverlayStamp > 6.0) {
+                    gWVDOverlayButton.hidden = YES;
+                }
+            }];
+        }
+    });
 }
 
 + (void)hideOverlay {
     dispatch_async(dispatch_get_main_queue(), ^{
-        gWVDOverlayWindow.hidden = YES;
+        gWVDOverlayButton.hidden = YES;
     });
 }
 
-/// 点击【下载】：取最近 120 秒内、与本次播放同一批抓到的最高画质 MP4
+/// 点击【下载】：
+/// 1. 优先用抓到的 CDN 直链（画质可控）
+/// 2. 抓不到就直接导出播放器正在播的 AVAsset（微博不暴露 URL 时这条兜底）
 + (void)handleTap:(UIButton *)sender {
     WVDVideoCandidate *candidate = [[WVDVideoURLStore sharedStore] bestCandidateWithin:120];
-    [[WVDDownloader shared] startDownloadWithCandidate:candidate];
+    if (candidate != nil) {
+        [[WVDDownloader shared] startDownloadWithCandidate:candidate];
+        return;
+    }
+
+    AVAsset *asset = gWVDLastPlayer.currentItem.asset;
+    WVDMarkEvent([NSString stringWithFormat:@"tap asset %@",
+                  asset != nil ? NSStringFromClass([asset class]) : @"nil"]);
+    [[WVDDownloader shared] startDownloadWithAsset:asset];
 }
 
 @end
@@ -531,6 +539,10 @@ static void WVDShowOverlayIfFullScreen(void);
     static BOOL isAttaching = NO;
     if (isAttaching) return;
     isAttaching = YES;
+
+    if (self.player != nil) {
+        gWVDLastPlayer = self.player;
+    }
 
     UIView *hostView = WVDHostViewForPlayerLayer(self);
     if (hostView != nil) {
