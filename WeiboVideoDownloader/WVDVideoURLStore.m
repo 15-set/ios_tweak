@@ -10,6 +10,9 @@
 
 #import "WVDVideoURLStore.h"
 
+// 实现在 Tweak.x，仅用于调试版把发现的候选地址打到屏幕/日志
+extern void WVDDebugNote(NSString *note);
+
 /// 最多缓存多少条候选
 static const NSUInteger kWVDMaxCandidates = 5;
 /// 候选的过期时间（秒）
@@ -171,7 +174,16 @@ static NSInteger WVDQualityScoreForURL(NSURL *url) {
         NSString *string = (NSString *)object;
         NSString *lower = string.lowercaseString;
         if (string.length < 2048 &&
-            [lower containsString:@".mp4"] &&
+            ([lower containsString:@".mp4"] || [lower containsString:@".m3u8"]) &&
+            ([string hasPrefix:@"http://"] || [string hasPrefix:@"https://"])) {
+            NSString *trimmed = string.length > 90
+                ? [[string substringToIndex:90] stringByAppendingString:@"…"]
+                : string;
+            WVDDebugNote([NSString stringWithFormat:@"json %@", trimmed]);
+        }
+
+        if (string.length < 2048 &&
+            ([lower containsString:@".mp4"] || [lower containsString:@".m3u8"]) &&
             [lower containsString:@"weibo"] &&
             ([string hasPrefix:@"http://"] || [string hasPrefix:@"https://"])) {
             NSURL *url = [NSURL URLWithString:string];

@@ -207,6 +207,29 @@ static void WVDUpdateDebugBadge(void) {
     [gWVDBadge setTitle:title forState:UIControlStateNormal];
 }
 
+/// 供其它 .m 文件打调试点（同一个 dylib 内可见）
+void WVDDebugNote(NSString *note) {
+    WVDMarkEvent(note);
+}
+
+/// 只记录“看起来像视频”的微博 URL，用来确认真实直链长什么样
+static void WVDLogInterestingURL(NSURL *url) {
+    if (url == nil) return;
+
+    NSString *host = url.host.lowercaseString;
+    if (![host containsString:@"weibo"] && ![host containsString:@"weibocdn"]) return;
+
+    NSString *absolute = url.absoluteString;
+    NSString *lower = absolute.lowercaseString;
+    if (![lower containsString:@"video"] && ![lower containsString:@"mp4"] &&
+        ![lower containsString:@"m3u8"] && ![lower containsString:@"play"]) return;
+
+    NSString *trimmed = absolute.length > 100
+        ? [[absolute substringToIndex:100] stringByAppendingString:@"…"]
+        : absolute;
+    WVDMarkEvent([NSString stringWithFormat:@"url %@", trimmed]);
+}
+
 #pragma mark - 播放器悬浮下载按钮
 
 @interface WVDPlayerOverlay : NSObject
@@ -346,6 +369,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
     if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
+        WVDLogInterestingURL(request.URL);
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
     return %orig;
@@ -355,6 +379,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
                             completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
+        WVDLogInterestingURL(request.URL);
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
     return %orig;
@@ -363,6 +388,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 - (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request {
     if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
+        WVDLogInterestingURL(request.URL);
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
     return %orig;
@@ -372,6 +398,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
                                     completionHandler:(void (^)(NSURL *location, NSURLResponse *response, NSError *error))completionHandler {
     if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
+        WVDLogInterestingURL(request.URL);
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
     return %orig;
@@ -389,6 +416,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
     }
     gWVDResumeCount++;
     if (WVDIsEnabled()) {
+        WVDLogInterestingURL([self originalRequest].URL);
         [[WVDVideoURLStore sharedStore] considerRequest:[self originalRequest]];
     }
     %orig;
@@ -407,6 +435,52 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
         [[WVDVideoURLStore sharedStore] considerURL:URL headerFields:headerFields];
     }
     WVDMarkEvent([NSString stringWithFormat:@"asset %@", URL.absoluteString.pathExtension ?: @"?"]);
+    return %orig;
+}
+
+%end
+
+static void WVDShowOverlayIfFullScreen(void);
+
+// 老 API 入口：+[AVAsset assetWithURL:] 以及直接拿 asset 建播放项
+%hook AVAsset
+
++ (instancetype)assetWithURL:(NSURL *)URL {
+    if (gWVDHookMode != WVDHookModeOff && WVDIsEnabled()) {
+        NSString *extension = URL.pathExtension.lowercaseString;
+        WVDMarkEvent([NSString stringWithFormat:@"assetW %@", extension.length ? extension : @"?"]);
+        [[WVDVideoURLStore sharedStore] considerAssetURL:URL];
+    }
+    return %orig;
+}
+
+%end
+
+%hook AVPlayerItem
+
++ (instancetype)playerItemWithAsset:(AVAsset *)asset {
+    if (gWVDHookMode != WVDHookModeOff && WVDIsEnabled()) {
+        if ([asset isKindOfClass:[AVURLAsset class]]) {
+            NSURL *URL = ((AVURLAsset *)asset).URL;
+            NSString *extension = URL.pathExtension.lowercaseString;
+            WVDMarkEvent([NSString stringWithFormat:@"itemA %@", extension.length ? extension : @"?"]);
+            [[WVDVideoURLStore sharedStore] considerAssetURL:URL];
+        }
+        WVDShowOverlayIfFullScreen();
+    }
+    return %orig;
+}
+
+- (instancetype)initWithAsset:(AVAsset *)asset {
+    if (gWVDHookMode != WVDHookModeOff && WVDIsEnabled()) {
+        if ([asset isKindOfClass:[AVURLAsset class]]) {
+            NSURL *URL = ((AVURLAsset *)asset).URL;
+            NSString *extension = URL.pathExtension.lowercaseString;
+            WVDMarkEvent([NSString stringWithFormat:@"itemA %@", extension.length ? extension : @"?"]);
+            [[WVDVideoURLStore sharedStore] considerAssetURL:URL];
+        }
+        WVDShowOverlayIfFullScreen();
+    }
     return %orig;
 }
 

@@ -140,7 +140,7 @@ static NSString *WVDQualityDescription(NSInteger quality) {
         if (!WVDIsEnabled()) return;
 
         if (candidate == nil || candidate.url.absoluteString.length == 0) {
-            [self _showFailureWithDetail:@"没有捕获到可下载的视频 MP4 直链。\n请先在微博里播放该视频，再点【下载】；若仍不行，可改用视频分享菜单里的【下载视频】。"];
+            [self _showFailureWithDetail:@"没抓到视频直链，请先播放视频再点下载。"];
             return;
         }
 
