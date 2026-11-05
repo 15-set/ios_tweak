@@ -1,0 +1,59 @@
+name: build-weibo
+
+# 只构建 WeiboVideoDownloader 子目录，不影响仓库根目录的 Insulation 工程
+on:
+  push:
+    paths:
+      - 'WeiboVideoDownloader/**'
+      - '.github/workflows/build-weibo.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    # arm64e 的 ABI v2 只有 Apple clang(Xcode) 能产出，所以必须 macOS runner
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        working-directory: WeiboVideoDownloader
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 准备环境变量
+        run: |
+          set -e
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 安装依赖（ldid 用于签名，xz 用于打包）
+        run: brew install ldid xz || brew upgrade ldid xz || true
+
+      - name: 安装 theos
+        run: |
+          set -e
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+
+      - name: 编译
+        run: |
+          set -o pipefail
+          make clean || true
+          make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: 打包
+        run: |
+          set -e
+          make package FINALPACKAGE=1
+          ls -l .theos/packages/
+
+      - name: 上传 deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeiboVideoDownloader-deb
+          path: WeiboVideoDownloader/.theos/packages/*.deb
+          if-no-files-found: error
+          retention-days: 14
