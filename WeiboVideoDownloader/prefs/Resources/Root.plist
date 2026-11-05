@@ -14,7 +14,7 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSwitchCell</key>
+			<string>PSSwitchCell</string>
 			<key>label</key>
 			<string>启用下载功能</string>
 			<key>key</key>
