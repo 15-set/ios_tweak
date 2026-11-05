@@ -1,0 +1,45 @@
+name: Build Jailbreak Repo
+on:
+  push:
+    branches: [main]
+    paths: ['debs/**','scripts/**','sections.json','overrides.json']
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动触发原因'
+        required: false
+        default: 'manual'
+concurrency:
+  group: build-repo
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev
+      - name: Build index
+        env:
+          GH_OWNER: ${{ github.repository_owner }}
+          GH_REPO: ${{ github.event.repository.name }}
+        run: |
+          set -e
+          # 仓库名等于 owner.github.io 时，Pages 根地址是 https://owner.github.io/
+          # 否则是 https://owner.github.io/仓库名/ —— 拼错会让 Release 的 Icon/Support 变成重复路径而 404
+          case "$GH_REPO" in
+            "$GH_OWNER.github.io") REPO_URL="https://$GH_OWNER.github.io/" ;;
+            *)                     REPO_URL="https://$GH_OWNER.github.io/$GH_REPO/" ;;
+          esac
+          export REPO_URL
+          echo "源地址: $REPO_URL"
+          bash scripts/make-index.sh || { echo "::error::make-index.sh 失败"; exit 1; }
+          echo "---- 生成的 Packages ----"; cat Packages
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B main
+          git add -A
+          if git diff --cached --quiet; then echo "索引无变化，跳过"; else git commit -m "chore: rebuild repo index" && git push -f origin main; fi
