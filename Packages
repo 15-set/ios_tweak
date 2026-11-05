@@ -5,6 +5,24 @@ Section: Tweaks
 Maintainer: doimty
 Installed-Size: 704
 Depends: dev.theos.orion (>= 1.0.0), firmware (>= 12.2)
+Filename: debs/insulation_充电温控.deb
+Size: 110168
+MD5sum: 2653e9df1176a7ae251135746f8a7176
+SHA1: 7ebe1c7b13911e0db1c9fee6dddd13f4e7944700
+SHA256: 21e94c507e7ed86923b484c3cd643848ca7f8b415a51ae42841843a354c5be05
+SHA512: 3acb97ad1604498c1978e34efa182b8dbc7ea9258ffcfb435541f5ba1ac16c64dd40db40ab6ec0739452972107f39f4d1f175053cd537f12f3dd0531ff655476
+Description: 增加了更新日志
+Name: insulation
+Author: be-huge & doimty
+Depiction: https://15-set.github.io/ios_tweak/depiction.html
+
+Package: com.be-huge.insulation
+Architecture: iphoneos-arm64
+Version: 0.0.19
+Section: Tweaks
+Maintainer: doimty
+Installed-Size: 704
+Depends: dev.theos.orion (>= 1.0.0), firmware (>= 12.2)
 Filename: debs/insulation_增加电池控温.deb
 Size: 124610
 MD5sum: 66ff018f210715ccb55868da02c9e7cb
