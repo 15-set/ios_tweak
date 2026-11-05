@@ -170,7 +170,6 @@ static void WVDEnsureDebugWindow(void) {
     badge.frame = CGRectMake(0, 0, 372, 24);
     badge.titleLabel.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightMedium];
     badge.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    badge.titleEdgeInsets = UIEdgeInsetsMake(0, 6, 0, 6);
     [badge setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     badge.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
     [badge addTarget:[WVDDebugBadge class]
