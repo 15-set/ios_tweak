@@ -206,36 +206,63 @@ static void WVDUpdateDebugBadge(void) {
 
 @interface WVDPlayerOverlay : NSObject
 
-+ (void)attachToHostViewIfNeeded:(UIView *)hostView;
-+ (CGRect)frameForButtonInHostView:(UIView *)hostView;
++ (void)showOverlay;
++ (void)hideOverlay;
++ (void)handleTap:(UIButton *)sender;
 
 @end
 
-/// 全局只保留一个按钮，播放器切换/复用时不会越挂越多
-static __weak UIButton *gWVDOverlayButton = nil;
+/// 按钮放在一个独立的高层浮窗里：不依赖播放器视图内部层级，
+/// 微博把播放器盖在哪个子视图上都不影响按钮显示。
+/// 窗口本身只有按钮大小，不会挡住页面其它区域的点击。
+static UIWindow *gWVDOverlayWindow = nil;
+static UIButton *gWVDOverlayButton = nil;
+static CFAbsoluteTime gWVDOverlayStamp = 0;
+static NSTimer *gWVDOverlayTimer = nil;
 
 @implementation WVDPlayerOverlay
 
-+ (void)attachToHostViewIfNeeded:(UIView *)hostView {
-    if (hostView == nil) return;
-
-    // 总开关关闭：清理已存在的按钮
+/// 播放器页面出现时调用（AVPlayerLayer 每次布局都会调）
++ (void)showOverlay {
     if (!WVDIsEnabled()) {
-        [gWVDOverlayButton removeFromSuperview];
-        gWVDOverlayButton = nil;
+        WVDMarkEvent(@"overlay disabled");
+        [self hideOverlay];
         return;
     }
 
-    // 只在“较大的播放器视图”上挂按钮（全屏播放器 / 视频详情页），
-    // 避免在信息流里的小视频卡片上到处出现按钮。
-    // 如果发现按钮出现的场景不合适，调整这两个阈值即可。
-    CGSize size = hostView.bounds.size;
-    if (size.width < 240.0 || size.height < 180.0) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self showOverlay];
+        });
+        return;
+    }
 
-    UIButton *button = gWVDOverlayButton;
+    UIWindowScene *scene = WVDActiveWindowScene();
+    if (scene == nil) return;
 
-    if (button == nil) {
-        button = [UIButton buttonWithType:UIButtonTypeCustom];
+    CGFloat width = 64.0;
+    CGFloat height = 30.0;
+    CGFloat inset = 12.0;
+
+    CGRect screenBounds = scene.coordinateSpace.bounds;
+    CGFloat top = inset;
+    for (UIWindow *window in scene.windows) {
+        if (window.isKeyWindow) {
+            top += window.safeAreaInsets.top;
+            break;
+        }
+    }
+
+    if (gWVDOverlayWindow == nil) {
+        UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
+        window.windowLevel = UIWindowLevelAlert + 1;
+        window.backgroundColor = [UIColor clearColor];
+
+        UIViewController *root = [[UIViewController alloc] init];
+        root.view.backgroundColor = [UIColor clearColor];
+        window.rootViewController = root;
+
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
         button.tag = kWVDDownButtonTag;
         button.titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
         [button setTitle:@"下载" forState:UIControlStateNormal];
@@ -246,40 +273,37 @@ static __weak UIButton *gWVDOverlayButton = nil;
         [button addTarget:[WVDPlayerOverlay class]
                    action:@selector(handleTap:)
          forControlEvents:UIControlEventTouchUpInside];
-    } else if (button.superview != hostView) {
-        // 换到新的播放器视图上
-        [button removeFromSuperview];
-    } else {
-        // 已经挂在这个视图上：只在位置真的变化时才改 frame。
-        // 这里不能每次都改 frame / bringSubviewToFront，否则会在 layoutSublayers
-        // 里反复触发重新布局，主线程卡在 CA 提交里出不来（表现为界面卡死）。
-        CGRect targetFrame = [self frameForButtonInHostView:hostView];
-        if (!CGRectEqualToRect(button.frame, targetFrame)) {
-            button.frame = targetFrame;
-            [hostView bringSubviewToFront:button];
-        }
-        return;
+        [root.view addSubview:button];
+
+        gWVDOverlayWindow = window;
+        gWVDOverlayButton = button;
     }
 
-    button.frame = [self frameForButtonInHostView:hostView];
-    [hostView addSubview:button];
-    [hostView bringSubviewToFront:button];
-    gWVDOverlayButton = button;
+    gWVDOverlayButton.frame = CGRectMake(0, 0, width, height);
+    gWVDOverlayWindow.frame = CGRectMake(screenBounds.size.width - width - inset, top, width, height);
+    if (gWVDOverlayWindow.hidden) {
+        WVDMarkEvent([NSString stringWithFormat:@"overlay on %.0fx%.0f", screenBounds.size.width, screenBounds.size.height]);
+    }
+    gWVDOverlayWindow.hidden = NO;
+
+    gWVDOverlayStamp = CFAbsoluteTimeGetCurrent();
+
+    // 15 秒内没有新的播放器布局就自动隐藏，避免按钮残留在其它页面
+    if (gWVDOverlayTimer == nil) {
+        gWVDOverlayTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                          repeats:YES
+                                                            block:^(NSTimer *timer) {
+            if (CFAbsoluteTimeGetCurrent() - gWVDOverlayStamp > 15.0) {
+                gWVDOverlayWindow.hidden = YES;
+            }
+        }];
+    }
 }
 
-+ (CGRect)frameForButtonInHostView:(UIView *)hostView {
-    // 按钮放在右上角；若与微博自身控件冲突，可改这里的 inset / 坐标
-    CGFloat width = 64.0;
-    CGFloat height = 30.0;
-    CGFloat inset = 12.0;
-
-    CGFloat top = inset;
-    if (@available(iOS 11.0, *)) {
-        top += hostView.safeAreaInsets.top;
-    }
-
-    CGRect bounds = hostView.bounds;
-    return CGRectMake(CGRectGetMaxX(bounds) - width - inset, top, width, height);
++ (void)hideOverlay {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gWVDOverlayWindow.hidden = YES;
+    });
 }
 
 /// 点击【下载】：取最近 120 秒内、与本次播放同一批抓到的最高画质 MP4
@@ -431,11 +455,14 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
     UIView *hostView = WVDHostViewForPlayerLayer(self);
     if (hostView != nil) {
-        gWVDLayoutCount++;
         CGSize size = hostView.bounds.size;
-        WVDMarkEvent([NSString stringWithFormat:@"layer %.0fx%.0f", size.width, size.height]);
-        // 内部会检查总开关，关闭时会移除已挂的按钮
-        [WVDPlayerOverlay attachToHostViewIfNeeded:hostView];
+        // 只认“较大的播放器视图”（全屏播放器 / 视频详情页），
+        // 避免信息流里的小视频卡片也弹出按钮
+        if (size.width >= 240.0 && size.height >= 180.0) {
+            gWVDLayoutCount++;
+            WVDMarkEvent([NSString stringWithFormat:@"layer %.0fx%.0f", size.width, size.height]);
+            [WVDPlayerOverlay showOverlay];
+        }
     }
 
     isAttaching = NO;
@@ -485,7 +512,7 @@ static UIView *WVDTopPresentedView(void) {
             viewSize.height < screen.size.height * 0.5) return;
 
         WVDMarkEvent([NSString stringWithFormat:@"play %.0fx%.0f", viewSize.width, viewSize.height]);
-        [WVDPlayerOverlay attachToHostViewIfNeeded:view];
+        [WVDPlayerOverlay showOverlay];
     });
 }
 
