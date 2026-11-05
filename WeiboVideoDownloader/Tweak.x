@@ -228,7 +228,8 @@ static void WVDEnsureDebugWindow(void) {
     download.layer.cornerRadius = 13.0;
     download.layer.masksToBounds = YES;
     download.hidden = YES;
-    [download addTarget:[WVDPlayerOverlay class]
+    // 用 NSClassFromString 取类，避免在 @implementation 之前引用前向声明
+    [download addTarget:NSClassFromString(@"WVDPlayerOverlay")
                  action:@selector(handleTap:)
        forControlEvents:UIControlEventTouchUpInside];
     [window.rootViewController.view addSubview:download];
