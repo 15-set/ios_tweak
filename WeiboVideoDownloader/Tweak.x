@@ -43,67 +43,164 @@ static UIView *WVDHostViewForPlayerLayer(CALayer *layer) {
     return nil;
 }
 
-#pragma mark - 调试探针（0.0.3 诊断版，定位“没按钮 / 打开图片卡死”）
+#pragma mark - 调试探针（0.0.4 诊断版：可点悬浮条切换 hook 模式来定位卡死）
+
+/// 0=全开 1=关 JSON 扫描 2=关所有网络 hook 3=全关（只留悬浮条）
+typedef NS_ENUM(NSInteger, WVDHookMode) {
+    WVDHookModeFull = 0,
+    WVDHookModeNoJSON = 1,
+    WVDHookModeNoNetwork = 2,
+    WVDHookModeOff = 3,
+};
 
 static NSObject *gWVDDebugLock = nil;
 static NSString *gWVDLastEvent = @"-";
-static int32_t gWVDResumeCount = 0;
-static int32_t gWVDJSONCount = 0;
-static int32_t gWVDAssetCount = 0;
-static int32_t gWVDLayoutCount = 0;
-static UILabel *gWVDBadge = nil;
+static NSMutableArray<NSString *> *gWVDEventLog = nil;
+static volatile int32_t gWVDResumeCount = 0;
+static volatile int32_t gWVDJSONCount = 0;
+static volatile int32_t gWVDAssetCount = 0;
+static volatile int32_t gWVDLayoutCount = 0;
+static volatile NSInteger gWVDHookMode = WVDHookModeFull;
+
+/// 独立浮窗 + 按钮，不依赖微博的 keyWindow，所以全屏播放/看图时也不会被盖住
+static UIWindow *gWVDDebugWindow = nil;
+static UIButton *gWVDBadge = nil;
 
 static void WVDSetupDebug(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         gWVDDebugLock = [[NSObject alloc] init];
+        gWVDEventLog = [NSMutableArray array];
     });
 }
 
-/// 记录最近一次触发的 hook，屏幕上直接可见，卡住时截图就能看到卡在哪一步
+static UIWindowScene *WVDActiveWindowScene(void) {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                return (UIWindowScene *)scene;
+            }
+        }
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) return (UIWindowScene *)scene;
+        }
+    }
+    return nil;
+}
+
+/// 事件写文件，路径：微博沙盒 tmp/wvd.log（Filza 里 应用数据 → 微博 → tmp 可看）
+/// 只记录“和上一条不同”的事件，避免刷屏；即使界面卡死，文件里也能看到最后一步
+static void WVDAppendLogLine(NSString *line) {
+    if (line.length == 0) return;
+
+    static dispatch_queue_t logQueue = nil;
+    static NSString *lastLine = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        logQueue = dispatch_queue_create("com.wvd.weibovideo.log", DISPATCH_QUEUE_SERIAL);
+    });
+
+    dispatch_async(logQueue, ^{
+        if (lastLine != nil && [lastLine isEqualToString:line]) return;
+        lastLine = [line copy];
+
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"wvd.log"];
+        NSString *content = [NSString stringWithFormat:@"%.1f %@\n", CFAbsoluteTimeGetCurrent(), line];
+        NSData *data = [content dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        if (![fileManager fileExistsAtPath:path]) {
+            [data writeToFile:path atomically:YES];
+            return;
+        }
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:data];
+        } @finally {
+            [handle closeFile];
+        }
+    });
+}
+
+/// 记录事件（内存 + 文件）
 static void WVDMarkEvent(NSString *event) {
     WVDSetupDebug();
     @synchronized (gWVDDebugLock) {
         gWVDLastEvent = [event copy];
-    }
-}
-
-static UIWindow *WVDKeyWindow(void) {
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                if (window.isKeyWindow) return window;
-            }
+        if (gWVDEventLog.lastObject == nil || ![gWVDEventLog.lastObject isEqualToString:event]) {
+            [gWVDEventLog addObject:event];
+            while (gWVDEventLog.count > 5) [gWVDEventLog removeObjectAtIndex:0];
         }
     }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    return UIApplication.sharedApplication.keyWindow;
-#pragma clang diagnostic pop
+    WVDAppendLogLine(event);
 }
 
-/// 屏幕左上角的状态条：证明 dylib 是否真的加载，以及各类 hook 的触发次数
+@interface WVDDebugBadge : NSObject
+@end
+
+@implementation WVDDebugBadge
+
+/// 点一下切换模式：FULL → NOJSON → NONET → OFF → FULL
++ (void)toggleMode:(UIButton *)sender {
+    gWVDHookMode = (gWVDHookMode + 1) % 4;
+    WVDMarkEvent([NSString stringWithFormat:@"MODE %ld", (long)gWVDHookMode]);
+}
+
+@end
+
+static void WVDUpdateDebugBadge(void);
+
+static void WVDEnsureDebugWindow(void) {
+    if (gWVDDebugWindow != nil) return;
+
+    UIWindowScene *scene = WVDActiveWindowScene();
+    if (scene == nil) return;
+
+    UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
+    window.frame = CGRectMake(6, 60, 372, 24);
+    window.windowLevel = UIWindowLevelAlert + 1;
+    window.backgroundColor = [UIColor clearColor];
+
+    UIViewController *root = [[UIViewController alloc] init];
+    root.view.backgroundColor = [UIColor clearColor];
+    window.rootViewController = root;
+
+    UIButton *badge = [UIButton buttonWithType:UIButtonTypeCustom];
+    badge.frame = CGRectMake(0, 0, 372, 24);
+    badge.titleLabel.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightMedium];
+    badge.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    badge.titleEdgeInsets = UIEdgeInsetsMake(0, 6, 0, 6);
+    [badge setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    badge.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
+    [badge addTarget:[WVDDebugBadge class]
+               action:@selector(toggleMode:)
+     forControlEvents:UIControlEventTouchUpInside];
+    [root.view addSubview:badge];
+
+    window.hidden = NO;
+
+    gWVDDebugWindow = window;
+    gWVDBadge = badge;
+
+    WVDUpdateDebugBadge();
+}
+
 static void WVDUpdateDebugBadge(void) {
-    if (gWVDBadge == nil) {
-        UIWindow *window = WVDKeyWindow();
-        if (window == nil) return;
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(6, 44, 360, 20)];
-        label.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightMedium];
-        label.textColor = [UIColor whiteColor];
-        label.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-        label.userInteractionEnabled = NO;
-        label.text = @"WVD 0.0.3 loading";
-        [window addSubview:label];
-        gWVDBadge = label;
+    WVDEnsureDebugWindow();
+    if (gWVDBadge == nil) return;
+
+    static NSString * const modeNames[] = { @"FULL", @"NOJSON", @"NONET", @"OFF" };
+    NSString *events = @"-";
+    @synchronized (gWVDDebugLock) {
+        events = [gWVDEventLog componentsJoinedByString:@" | "];
+        if (events.length == 0) events = @"-";
     }
 
-    NSString *event = @"-";
-    @synchronized (gWVDDebugLock) {
-        event = gWVDLastEvent;
-    }
-    gWVDBadge.text = [NSString stringWithFormat:@"WVD 0.0.3 net%d json%d asset%d lay%d %@",
-                      gWVDResumeCount, gWVDJSONCount, gWVDAssetCount, gWVDLayoutCount, event];
+    NSString *title = [NSString stringWithFormat:@"WVD %@ net%d json%d asset%d lay%d  %@",
+                       modeNames[gWVDHookMode], gWVDResumeCount, gWVDJSONCount,
+                       gWVDAssetCount, gWVDLayoutCount, events];
+    [gWVDBadge setTitle:title forState:UIControlStateNormal];
 }
 
 #pragma mark - 播放器悬浮下载按钮
@@ -219,6 +316,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 %hook NSURLSession
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
@@ -227,6 +325,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
@@ -234,6 +333,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 }
 
 - (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request {
+    if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
@@ -242,6 +342,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 - (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request
                                     completionHandler:(void (^)(NSURL *location, NSURLResponse *response, NSError *error))completionHandler {
+    if (gWVDHookMode >= WVDHookModeNoNetwork) return %orig;
     if (WVDIsEnabled()) {
         [[WVDVideoURLStore sharedStore] considerRequest:request];
     }
@@ -254,6 +355,10 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 // 所有网络任务启动时也能拿到原始请求；只读 URL，不做任何修改
 - (void)resume {
+    if (gWVDHookMode >= WVDHookModeNoNetwork) {
+        %orig;
+        return;
+    }
     gWVDResumeCount++;
     if (WVDIsEnabled()) {
         [[WVDVideoURLStore sharedStore] considerRequest:[self originalRequest]];
@@ -267,6 +372,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 // 播放器创建资源时会走到这里，可以拿到 m3u8 / mp4 的地址
 - (instancetype)initWithURL:(NSURL *)URL options:(NSDictionary<NSString *, id> *)options {
+    if (gWVDHookMode == WVDHookModeOff) return %orig;
     gWVDAssetCount++;
     if (WVDIsEnabled()) {
         NSDictionary *headerFields = options[@"AVURLAssetHTTPHeaderFieldsKey"];
@@ -284,6 +390,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 // 只遍历返回对象里的字符串，不会改动 JSON 内容。
 + (id)JSONObjectWithData:(NSData *)data options:(NSJSONReadingOptions)options error:(NSError **)error {
     id object = %orig;
+    if (gWVDHookMode == WVDHookModeNoJSON || gWVDHookMode == WVDHookModeOff) return object;
     if (object != nil && WVDIsEnabled() && WVDJSONDataContainsMP4(data)) {
         // 扫描放到后台串行队列，绝不在解析 JSON 的线程（常常是主线程）上做遍历，
         // 否则图片/信息流页会明显卡顿甚至假死。
@@ -309,6 +416,10 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 // 播放器每次布局（首次显示、旋转、全屏切换）都会调用，用来挂按钮和纠正位置
 - (void)layoutSublayers {
+    if (gWVDHookMode == WVDHookModeOff) {
+        %orig;
+        return;
+    }
     %orig;
 
     // CALayer 布局理论上在主线程，但为稳妥起见仍然做一次检查，避免后台线程动 UI
@@ -333,12 +444,61 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 %end
 
+#pragma mark - Hook：AVPlayer 开始播放时挂按钮（不依赖 AVPlayerLayer）
+
+/// 当前最上层 VC 的 view，用于把按钮挂到全屏播放页上
+static UIView *WVDTopPresentedView(void) {
+    UIWindowScene *scene = WVDActiveWindowScene();
+    UIWindow *window = nil;
+    if (scene != nil) {
+        for (UIWindow *candidate in scene.windows) {
+            if (candidate.isKeyWindow) {
+                window = candidate;
+                break;
+            }
+        }
+    }
+    if (window == nil) return nil;
+
+    UIViewController *controller = window.rootViewController;
+    while (controller.presentedViewController) {
+        controller = controller.presentedViewController;
+    }
+    return controller.view;
+}
+
+%hook AVPlayer
+
+- (void)play {
+    %orig;
+
+    if (gWVDHookMode != WVDHookModeFull) return;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIView *view = WVDTopPresentedView();
+        if (view == nil) return;
+
+        CGSize viewSize = view.bounds.size;
+        CGRect screen = UIScreen.mainScreen.bounds;
+        // 只挂到接近全屏的播放页，避免信息流小窗到处出现按钮
+        if (viewSize.width < screen.size.width * 0.9 ||
+            viewSize.height < screen.size.height * 0.5) return;
+
+        WVDMarkEvent([NSString stringWithFormat:@"play %.0fx%.0f", viewSize.width, viewSize.height]);
+        [WVDPlayerOverlay attachToHostViewIfNeeded:view];
+    });
+}
+
+%end
+
 #pragma mark - Hook：分享菜单追加【下载视频】
 
 %hook UIActivityViewController
 
 - (instancetype)initWithActivityItems:(NSArray *)activityItems
                 applicationActivities:(NSArray<UIActivity *> *)applicationActivities {
+    if (gWVDHookMode == WVDHookModeOff) return %orig;
     if (WVDIsEnabled()) {
         // 判断分享内容里是否直接带有微博视频地址
         BOOL itemsContainVideo = NO;
@@ -387,6 +547,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 %ctor {
     WVDSetupDebug();
     NSLog(@"[WVD] WeiboVideoDownloader loaded");
+    WVDMarkEvent(@"loaded");
 
     dispatch_async(dispatch_get_main_queue(), ^{
         WVDUpdateDebugBadge();
