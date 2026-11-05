@@ -6,15 +6,16 @@ Maintainer: doimty
 Installed-Size: 704
 Depends: dev.theos.orion (>= 1.0.0), firmware (>= 12.2)
 Filename: debs/com.be-huge.insulation_0.0.20_iphoneos-arm64.deb
-Size: 110252
-MD5sum: a6e7becd057bb9488803d68b759098f4
-SHA1: fd8b89a557e31e5a0a4592b4a9014b815e6afcd7
-SHA256: d6921e8bbec9d89c310fb9ee8fcce216e72f5ac10485381bbdb8d275eeab098f
-SHA512: 4785b9694983cf4426807b5acc5c20f6ecff2ae5b74a15d44790f79eec007126c7905faa70e600dfc1fdf711b4c80394c7c00c08bbc2230f3f9af8abdc0fbcc7
+Size: 110212
+MD5sum: 6da31a99b76c765e3cb3168b945eb5b5
+SHA1: 828e517444afb2a6017de218219e5722b76c0e56
+SHA256: 74c84f543293240cd819d2f205121b8a1c6272526f8ac8c6343d80de341b5ff1
+SHA512: faa2815a1f472d94b7012f2ddde5e7b8cb853aec704a9eeee2d63d089894614d62e9f41110ed66fc10581f422bd2f70c9d8a7cec25d67d53e9cd2744dbab2ee6
 Description: 解除温控，一切从简即可。代码来自开源项目：https://github.com/be-huge/insulation 进行简单维护
  本版新增：设置面板「充电」分组，可开启「充电时用原生温控」——充电时把 CPU 温控交还系统，拔电恢复原设置。
 Name: insulation
 Author: be-huge & doimty
+Depiction: https://15-set.github.io/ios_tweak/depiction.html
 
 Package: com.be-huge.insulation
 Architecture: iphoneos-arm64
