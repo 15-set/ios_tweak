@@ -48,12 +48,12 @@ jobs:
         run: |
           set -e
           make package FINALPACKAGE=1
-          ls -l .theos/packages/
+          ls -l packages/
 
       - name: 上传 deb
         uses: actions/upload-artifact@v4
         with:
           name: WeiboVideoDownloader-deb
-          path: WeiboVideoDownloader/.theos/packages/*.deb
+          path: WeiboVideoDownloader/packages/*.deb
           if-no-files-found: error
           retention-days: 14
