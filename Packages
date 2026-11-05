@@ -1,0 +1,18 @@
+Package: com.be-huge.insulation
+Architecture: iphoneos-arm64
+Version: 0.0.19
+Section: Tweaks
+Maintainer: doimty
+Installed-Size: 704
+Depends: dev.theos.orion (>= 1.0.0), firmware (>= 12.2)
+Filename: debs/insulation_增加电池控温.deb
+Size: 124610
+MD5sum: 66ff018f210715ccb55868da02c9e7cb
+SHA1: eae2c8cecd886390ff24a41335c267793f41c8bb
+SHA256: a9c93c1f0e5bae631ab093c3f2b560ec44feb2943a11af62a2743caf0ffa718b
+SHA512: 6c8fd7caf1a666dfd2c89b9eacd9ab185b046318bdb6101b141bc7322c9a454cee0ece8ca9095ef6596d9f244de30c3e93e080dc2f761a321e3c226972a96de0
+Description: 解除温控，一切从简即可。代码来自开源项目：https://github.com/be-huge/insulation 进行简单维护
+ 本版新增：设置面板「充电」分组，可开启「充电时用原生温控」——充电时把 CPU 温控交还系统，拔电恢复原设置。
+Name: insulation
+Author: be-huge & doimty
+
