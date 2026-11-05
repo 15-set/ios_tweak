@@ -1,0 +1,13 @@
+{
+  "class": "FeaturedBannersView",
+  "itemSize": "{400, 255}",
+  "itemCornerRadius": 12,
+  "banners": [
+    {
+      "url": "https://15-set.github.io/ios_tweak/banner-1793842486647.jpg",
+      "title": "",
+      "hideShadow": true,
+      "displayText": false
+    }
+  ]
+}
