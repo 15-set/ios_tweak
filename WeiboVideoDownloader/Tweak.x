@@ -161,50 +161,37 @@ static void WVDMarkEvent(NSString *event) {
 
 static void WVDUpdateDebugBadge(void);
 
-/// 空白区域不拦截触摸，只有调试条和下载按钮本身能点，不挡微博页面操作
-@interface WVDPassThroughView : UIView
-@end
-
-@implementation WVDPassThroughView
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    return hit == self ? nil : hit;
-}
-
-@end
-
-@interface WVDPassThroughController : UIViewController
-@end
-
-@implementation WVDPassThroughController
-
-- (void)loadView {
-    self.view = [[WVDPassThroughView alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    self.view.backgroundColor = [UIColor clearColor];
-}
-
-@end
-
-/// 调试条和下载按钮放在同一个全屏透明窗口里，保证两者可见性一致
+/// 调试条放在屏幕底部，避免和右上角的下载按钮重叠
 static void WVDEnsureDebugWindow(void) {
     if (gWVDDebugWindow != nil) return;
+    // 启动阶段（dyld 刚加载完）不建窗口，等 App 真正进入前台再建，避免卡启动
+    if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
 
     UIWindowScene *scene = WVDActiveWindowScene();
     if (scene == nil) return;
 
     CGRect bounds = scene.coordinateSpace.bounds;
-    CGFloat buttonWidth = 52.0;
-    CGFloat buttonHeight = 26.0;
+    CGFloat badgeWidth = bounds.size.width - 12.0;
+    CGFloat bottomInset = 0;
+    for (UIWindow *candidate in scene.windows) {
+        if (candidate.isKeyWindow) {
+            bottomInset = candidate.safeAreaInsets.bottom;
+            break;
+        }
+    }
+    CGFloat y = bounds.size.height - bottomInset - 30.0;
 
     UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
-    window.frame = bounds;
+    window.frame = CGRectMake(6, y, badgeWidth, 22);
     window.windowLevel = UIWindowLevelAlert + 1;
     window.backgroundColor = [UIColor clearColor];
-    window.rootViewController = [[WVDPassThroughController alloc] init];
+
+    UIViewController *root = [[UIViewController alloc] init];
+    root.view.backgroundColor = [UIColor clearColor];
+    window.rootViewController = root;
 
     UIButton *badge = [UIButton buttonWithType:UIButtonTypeCustom];
-    badge.frame = CGRectMake(6, 60, bounds.size.width - 12.0 - buttonWidth - 8.0, 22);
+    badge.frame = CGRectMake(0, 0, badgeWidth, 22);
     badge.titleLabel.font = [UIFont systemFontOfSize:8.0 weight:UIFontWeightMedium];
     badge.titleLabel.adjustsFontSizeToFitWidth = YES;
     badge.titleLabel.minimumScaleFactor = 0.6;
@@ -215,31 +202,12 @@ static void WVDEnsureDebugWindow(void) {
     [badge addTarget:[WVDDebugBadge class]
                action:@selector(toggleMode:)
      forControlEvents:UIControlEventTouchUpInside];
-    [window.rootViewController.view addSubview:badge];
-
-    UIButton *download = [UIButton buttonWithType:UIButtonTypeCustom];
-    download.frame = CGRectMake(bounds.size.width - buttonWidth - 10.0, 58.0,
-                                buttonWidth, buttonHeight);
-    download.tag = kWVDDownButtonTag;
-    download.titleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
-    [download setTitle:@"下载" forState:UIControlStateNormal];
-    [download setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    download.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
-    download.layer.cornerRadius = 13.0;
-    download.layer.masksToBounds = YES;
-    download.hidden = YES;
-    // 用 NSClassFromString 取类，避免在 @implementation 之前引用前向声明
-    [download addTarget:NSClassFromString(@"WVDPlayerOverlay")
-                 action:@selector(handleTap:)
-       forControlEvents:UIControlEventTouchUpInside];
-    [window.rootViewController.view addSubview:download];
+    [root.view addSubview:badge];
 
     window.hidden = NO;
 
     gWVDDebugWindow = window;
     gWVDBadge = badge;
-    gWVDOverlayButton = download;
-    gWVDOverlayWindow = window;
 
     WVDUpdateDebugBadge();
 }
@@ -305,8 +273,51 @@ static void WVDLogInterestingURL(NSURL *url) {
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        WVDEnsureDebugWindow();
-        if (gWVDOverlayButton == nil) return;
+        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+        if (gWVDOverlayWindow == nil) {
+            UIWindowScene *scene = WVDActiveWindowScene();
+            if (scene == nil) return;
+
+            CGRect bounds = scene.coordinateSpace.bounds;
+            CGFloat width = 52.0;
+            CGFloat height = 26.0;
+            CGFloat top = 10.0;
+            for (UIWindow *candidate in scene.windows) {
+                if (candidate.isKeyWindow) {
+                    top += candidate.safeAreaInsets.top;
+                    break;
+                }
+            }
+
+            UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
+            window.windowLevel = UIWindowLevelAlert + 1;
+            window.backgroundColor = [UIColor clearColor];
+
+            UIViewController *root = [[UIViewController alloc] init];
+            root.view.backgroundColor = [UIColor clearColor];
+            root.view.frame = CGRectMake(0, 0, width, height);
+            window.rootViewController = root;
+
+            UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+            button.tag = kWVDDownButtonTag;
+            button.frame = CGRectMake(0, 0, width, height);
+            button.titleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
+            [button setTitle:@"下载" forState:UIControlStateNormal];
+            [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            button.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
+            button.layer.cornerRadius = 13.0;
+            button.layer.masksToBounds = YES;
+            [button addTarget:[WVDPlayerOverlay class]
+                       action:@selector(handleTap:)
+             forControlEvents:UIControlEventTouchUpInside];
+            [root.view addSubview:button];
+
+            window.frame = CGRectMake(bounds.size.width - width - 10.0, top, width, height);
+            window.hidden = NO;
+
+            gWVDOverlayWindow = window;
+            gWVDOverlayButton = button;
+        }
 
         if (gWVDOverlayButton.hidden) {
             gWVDOverlayButton.hidden = NO;
@@ -314,12 +325,11 @@ static void WVDLogInterestingURL(NSURL *url) {
         }
         gWVDOverlayStamp = CFAbsoluteTimeGetCurrent();
 
-        // 6 秒内没有新的播放器布局就自动隐藏，避免按钮残留在其它页面
+        // 播放中一直保留按钮；暂停且 6 秒内没有新的布局才隐藏
         if (gWVDOverlayTimer == nil) {
             gWVDOverlayTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
                                                               repeats:YES
                                                                 block:^(NSTimer *timer) {
-                // 播放中一直保留按钮；暂停且 6 秒没有新的布局才隐藏
                 BOOL playing = gWVDLastPlayer.rate > 0.1f;
                 if (!playing &&
                     CFAbsoluteTimeGetCurrent() - gWVDOverlayStamp > 6.0) {
