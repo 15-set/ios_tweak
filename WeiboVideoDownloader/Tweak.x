@@ -91,9 +91,14 @@ static __weak UIButton *gWVDOverlayButton = nil;
         // 换到新的播放器视图上
         [button removeFromSuperview];
     } else {
-        // 已经挂在这个视图上，只更新位置（播放器旋转/全屏时布局会反复调用）
-        button.frame = [self frameForButtonInHostView:hostView];
-        [hostView bringSubviewToFront:button];
+        // 已经挂在这个视图上：只在位置真的变化时才改 frame。
+        // 这里不能每次都改 frame / bringSubviewToFront，否则会在 layoutSublayers
+        // 里反复触发重新布局，主线程卡在 CA 提交里出不来（表现为界面卡死）。
+        CGRect targetFrame = [self frameForButtonInHostView:hostView];
+        if (!CGRectEqualToRect(button.frame, targetFrame)) {
+            button.frame = targetFrame;
+            [hostView bringSubviewToFront:button];
+        }
         return;
     }
 
@@ -127,6 +132,24 @@ static __weak UIButton *gWVDOverlayButton = nil;
 @end
 
 #pragma mark - Hook：收集视频直链（全部为只读操作）
+
+/// 快速预检：JSON 原文里连 ".mp4" 都没有就不做深度遍历。
+/// 微博的图片/信息流接口会频繁返回大 JSON，逐节点扫描会拖慢主线程（表现为卡住）。
+static BOOL WVDJSONDataContainsMP4(NSData *data) {
+    if (data.length == 0 || data.length > 512 * 1024) return NO;
+
+    static NSData *lowerNeedle = nil;
+    static NSData *upperNeedle = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lowerNeedle = [@".mp4" dataUsingEncoding:NSUTF8StringEncoding];
+        upperNeedle = [@".MP4" dataUsingEncoding:NSUTF8StringEncoding];
+    });
+
+    NSRange fullRange = NSMakeRange(0, data.length);
+    if ([data rangeOfData:lowerNeedle options:0 range:fullRange].location != NSNotFound) return YES;
+    return [data rangeOfData:upperNeedle options:0 range:fullRange].location != NSNotFound;
+}
 
 // NSURLSession 的任务创建入口也记录一份（和下面的 -resume 互为兜底，
 // 有些版本的 NSURLSessionTask 是类簇，只 hook resume 可能漏掉）
@@ -195,8 +218,17 @@ static __weak UIButton *gWVDOverlayButton = nil;
 // 只遍历返回对象里的字符串，不会改动 JSON 内容。
 + (id)JSONObjectWithData:(NSData *)data options:(NSJSONReadingOptions)options error:(NSError **)error {
     id object = %orig;
-    if (WVDIsEnabled() && object != nil) {
-        [[WVDVideoURLStore sharedStore] considerJSONObject:object];
+    if (object != nil && WVDIsEnabled() && WVDJSONDataContainsMP4(data)) {
+        // 扫描放到后台串行队列，绝不在解析 JSON 的线程（常常是主线程）上做遍历，
+        // 否则图片/信息流页会明显卡顿甚至假死。
+        static dispatch_queue_t scanQueue = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            scanQueue = dispatch_queue_create("com.wvd.weibovideo.jsonscan", DISPATCH_QUEUE_SERIAL);
+        });
+        dispatch_async(scanQueue, ^{
+            [[WVDVideoURLStore sharedStore] considerJSONObject:object];
+        });
     }
     return object;
 }
@@ -214,11 +246,18 @@ static __weak UIButton *gWVDOverlayButton = nil;
     // CALayer 布局理论上在主线程，但为稳妥起见仍然做一次检查，避免后台线程动 UI
     if (![NSThread isMainThread]) return;
 
+    // 加一层重入保护：挂按钮会触发新的布局，避免 layout 互相触发形成死循环
+    static BOOL isAttaching = NO;
+    if (isAttaching) return;
+    isAttaching = YES;
+
     UIView *hostView = WVDHostViewForPlayerLayer(self);
     if (hostView != nil) {
         // 内部会检查总开关，关闭时会移除已挂的按钮
         [WVDPlayerOverlay attachToHostViewIfNeeded:hostView];
     }
+
+    isAttaching = NO;
 }
 
 %end
@@ -269,3 +308,10 @@ static __weak UIButton *gWVDOverlayButton = nil;
 }
 
 %end
+
+#pragma mark - 加载标记
+
+// 注入后可用控制台/`log stream` 搜索 WVD 确认 dylib 是否真的被加载
+%ctor {
+    NSLog(@"[WVD] WeiboVideoDownloader loaded");
+}
