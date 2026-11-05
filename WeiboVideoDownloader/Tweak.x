@@ -319,7 +319,10 @@ static void WVDLogInterestingURL(NSURL *url) {
             gWVDOverlayTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
                                                               repeats:YES
                                                                 block:^(NSTimer *timer) {
-                if (CFAbsoluteTimeGetCurrent() - gWVDOverlayStamp > 6.0) {
+                // 播放中一直保留按钮；暂停且 6 秒没有新的布局才隐藏
+                BOOL playing = gWVDLastPlayer.rate > 0.1f;
+                if (!playing &&
+                    CFAbsoluteTimeGetCurrent() - gWVDOverlayStamp > 6.0) {
                     gWVDOverlayButton.hidden = YES;
                 }
             }];
