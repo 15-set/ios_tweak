@@ -1,5 +1,25 @@
 Package: com.be-huge.insulation
 Architecture: iphoneos-arm64
+Version: 0.0.20
+Section: Tweaks
+Maintainer: doimty
+Installed-Size: 704
+Depends: dev.theos.orion (>= 1.0.0), firmware (>= 12.2)
+Filename: debs/com.be-huge.insulation_0.0.20_iphoneos-arm64.deb
+Size: 110172
+MD5sum: 436ec6884ae56392eba4a9e8850e2fca
+SHA1: 54575627c49cfbdb7a601bd8df9700d143158c4b
+SHA256: 45a71055c1f3fa3e5d92d7d8a68cc72e261e5b3338a548af631ee96da73ca70e
+SHA512: 5799d3c2022bd2800b4f05919cd92d056b2fece09f00049c9109adb79bc248e8db0e43133d2606d8db7129cd04af9b56baca44dcfa78ba556810644dbecea50b
+Description: 解除温控，一切从简即可。代码来自开源项目：https://github.com/be-huge/insulation 进行简单维护
+ 本版新增：设置面板「充电」分组，可开启「充电时用原生温控」——充电时把 CPU 温控交还系统，拔电恢复原设置。
+Name: insulation
+Author: be-huge & doimty
+Depiction: https://15-set.github.io/ios_tweak/depiction.html
+Changelog: https://15-set.github.io/ios_tweak/changelog.html
+
+Package: com.be-huge.insulation
+Architecture: iphoneos-arm64
 Version: 0.0.19
 Section: Tweaks
 Maintainer: doimty
