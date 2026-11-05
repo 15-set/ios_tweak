@@ -43,6 +43,69 @@ static UIView *WVDHostViewForPlayerLayer(CALayer *layer) {
     return nil;
 }
 
+#pragma mark - 调试探针（0.0.3 诊断版，定位“没按钮 / 打开图片卡死”）
+
+static NSObject *gWVDDebugLock = nil;
+static NSString *gWVDLastEvent = @"-";
+static int32_t gWVDResumeCount = 0;
+static int32_t gWVDJSONCount = 0;
+static int32_t gWVDAssetCount = 0;
+static int32_t gWVDLayoutCount = 0;
+static UILabel *gWVDBadge = nil;
+
+static void WVDSetupDebug(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        gWVDDebugLock = [[NSObject alloc] init];
+    });
+}
+
+/// 记录最近一次触发的 hook，屏幕上直接可见，卡住时截图就能看到卡在哪一步
+static void WVDMarkEvent(NSString *event) {
+    WVDSetupDebug();
+    @synchronized (gWVDDebugLock) {
+        gWVDLastEvent = [event copy];
+    }
+}
+
+static UIWindow *WVDKeyWindow(void) {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                if (window.isKeyWindow) return window;
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return UIApplication.sharedApplication.keyWindow;
+#pragma clang diagnostic pop
+}
+
+/// 屏幕左上角的状态条：证明 dylib 是否真的加载，以及各类 hook 的触发次数
+static void WVDUpdateDebugBadge(void) {
+    if (gWVDBadge == nil) {
+        UIWindow *window = WVDKeyWindow();
+        if (window == nil) return;
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(6, 44, 360, 20)];
+        label.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightMedium];
+        label.textColor = [UIColor whiteColor];
+        label.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+        label.userInteractionEnabled = NO;
+        label.text = @"WVD 0.0.3 loading";
+        [window addSubview:label];
+        gWVDBadge = label;
+    }
+
+    NSString *event = @"-";
+    @synchronized (gWVDDebugLock) {
+        event = gWVDLastEvent;
+    }
+    gWVDBadge.text = [NSString stringWithFormat:@"WVD 0.0.3 net%d json%d asset%d lay%d %@",
+                      gWVDResumeCount, gWVDJSONCount, gWVDAssetCount, gWVDLayoutCount, event];
+}
+
 #pragma mark - 播放器悬浮下载按钮
 
 @interface WVDPlayerOverlay : NSObject
@@ -191,6 +254,7 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 // 所有网络任务启动时也能拿到原始请求；只读 URL，不做任何修改
 - (void)resume {
+    gWVDResumeCount++;
     if (WVDIsEnabled()) {
         [[WVDVideoURLStore sharedStore] considerRequest:[self originalRequest]];
     }
@@ -203,10 +267,12 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 // 播放器创建资源时会走到这里，可以拿到 m3u8 / mp4 的地址
 - (instancetype)initWithURL:(NSURL *)URL options:(NSDictionary<NSString *, id> *)options {
+    gWVDAssetCount++;
     if (WVDIsEnabled()) {
         NSDictionary *headerFields = options[@"AVURLAssetHTTPHeaderFieldsKey"];
         [[WVDVideoURLStore sharedStore] considerURL:URL headerFields:headerFields];
     }
+    WVDMarkEvent([NSString stringWithFormat:@"asset %@", URL.absoluteString.pathExtension ?: @"?"]);
     return %orig;
 }
 
@@ -226,6 +292,8 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
         dispatch_once(&onceToken, ^{
             scanQueue = dispatch_queue_create("com.wvd.weibovideo.jsonscan", DISPATCH_QUEUE_SERIAL);
         });
+        gWVDJSONCount++;
+        WVDMarkEvent(@"json");
         dispatch_async(scanQueue, ^{
             [[WVDVideoURLStore sharedStore] considerJSONObject:object];
         });
@@ -253,6 +321,9 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
     UIView *hostView = WVDHostViewForPlayerLayer(self);
     if (hostView != nil) {
+        gWVDLayoutCount++;
+        CGSize size = hostView.bounds.size;
+        WVDMarkEvent([NSString stringWithFormat:@"layer %.0fx%.0f", size.width, size.height]);
         // 内部会检查总开关，关闭时会移除已挂的按钮
         [WVDPlayerOverlay attachToHostViewIfNeeded:hostView];
     }
@@ -311,7 +382,18 @@ static BOOL WVDJSONDataContainsMP4(NSData *data) {
 
 #pragma mark - 加载标记
 
-// 注入后可用控制台/`log stream` 搜索 WVD 确认 dylib 是否真的被加载
+// 注入后可用控制台/`log stream` 搜索 WVD 确认 dylib 是否真的被加载；
+// 同时启动左上角状态条，没条件看日志时直接看屏幕也能判断
 %ctor {
+    WVDSetupDebug();
     NSLog(@"[WVD] WeiboVideoDownloader loaded");
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        WVDUpdateDebugBadge();
+        [NSTimer scheduledTimerWithTimeInterval:1.0
+                                       repeats:YES
+                                         block:^(NSTimer *timer) {
+            WVDUpdateDebugBadge();
+        }];
+    });
 }
