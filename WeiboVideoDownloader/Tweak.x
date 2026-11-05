@@ -157,8 +157,10 @@ static void WVDEnsureDebugWindow(void) {
     UIWindowScene *scene = WVDActiveWindowScene();
     if (scene == nil) return;
 
+    CGFloat badgeWidth = scene.coordinateSpace.bounds.size.width - 12.0;
+
     UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
-    window.frame = CGRectMake(6, 60, 372, 24);
+    window.frame = CGRectMake(6, 60, badgeWidth, 22);
     window.windowLevel = UIWindowLevelAlert + 1;
     window.backgroundColor = [UIColor clearColor];
 
@@ -167,8 +169,11 @@ static void WVDEnsureDebugWindow(void) {
     window.rootViewController = root;
 
     UIButton *badge = [UIButton buttonWithType:UIButtonTypeCustom];
-    badge.frame = CGRectMake(0, 0, 372, 24);
-    badge.titleLabel.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightMedium];
+    badge.frame = CGRectMake(0, 0, badgeWidth, 22);
+    badge.titleLabel.font = [UIFont systemFontOfSize:8.0 weight:UIFontWeightMedium];
+    badge.titleLabel.adjustsFontSizeToFitWidth = YES;
+    badge.titleLabel.minimumScaleFactor = 0.6;
+    badge.titleLabel.lineBreakMode = NSLineBreakByClipping;
     badge.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     [badge setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     badge.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
@@ -240,9 +245,9 @@ static NSTimer *gWVDOverlayTimer = nil;
     UIWindowScene *scene = WVDActiveWindowScene();
     if (scene == nil) return;
 
-    CGFloat width = 64.0;
-    CGFloat height = 30.0;
-    CGFloat inset = 12.0;
+    CGFloat width = 52.0;
+    CGFloat height = 26.0;
+    CGFloat inset = 10.0;
 
     CGRect screenBounds = scene.coordinateSpace.bounds;
     CGFloat top = inset;
@@ -264,11 +269,11 @@ static NSTimer *gWVDOverlayTimer = nil;
 
         UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
         button.tag = kWVDDownButtonTag;
-        button.titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+        button.titleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
         [button setTitle:@"下载" forState:UIControlStateNormal];
         [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        button.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
-        button.layer.cornerRadius = 6.0;
+        button.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+        button.layer.cornerRadius = 13.0;
         button.layer.masksToBounds = YES;
         [button addTarget:[WVDPlayerOverlay class]
                    action:@selector(handleTap:)
@@ -493,27 +498,81 @@ static UIView *WVDTopPresentedView(void) {
     return controller.view;
 }
 
-%hook AVPlayer
+/// 只在“接近全屏的播放页”显示按钮，信息流小窗不弹
+static void WVDShowOverlayIfFullScreen(void) {
+    if (gWVDHookMode == WVDHookModeOff) return;
 
-- (void)play {
-    %orig;
-
-    if (gWVDHookMode != WVDHookModeFull) return;
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         UIView *view = WVDTopPresentedView();
         if (view == nil) return;
 
         CGSize viewSize = view.bounds.size;
         CGRect screen = UIScreen.mainScreen.bounds;
-        // 只挂到接近全屏的播放页，避免信息流小窗到处出现按钮
         if (viewSize.width < screen.size.width * 0.9 ||
             viewSize.height < screen.size.height * 0.5) return;
 
-        WVDMarkEvent([NSString stringWithFormat:@"play %.0fx%.0f", viewSize.width, viewSize.height]);
         [WVDPlayerOverlay showOverlay];
     });
+}
+
+%hook AVPlayer
+
+- (void)play {
+    %orig;
+    WVDShowOverlayIfFullScreen();
+}
+
+- (void)playImmediatelyAtRate:(float)rate {
+    %orig;
+    WVDShowOverlayIfFullScreen();
+}
+
+- (void)setRate:(float)rate {
+    %orig;
+    if (rate > 0.0f) {
+        WVDShowOverlayIfFullScreen();
+    }
+}
+
+%end
+
+#pragma mark - Hook：播放器资源地址（AVURLAsset / AVPlayerItem 类方法）
+
+// 微博部分版本不走 -initWithURL:options:，而是走类方法，这里补上，顺便拿到真正的播放地址
+%hook AVURLAsset
+
++ (instancetype)URLAssetWithURL:(NSURL *)URL options:(NSDictionary<NSString *, id> *)options {
+    if (gWVDHookMode != WVDHookModeOff && WVDIsEnabled()) {
+        NSString *extension = URL.pathExtension.lowercaseString;
+        WVDMarkEvent([NSString stringWithFormat:@"asset+ %@", extension.length ? extension : @"?"]);
+        [[WVDVideoURLStore sharedStore] considerAssetURL:URL];
+    }
+    return %orig;
+}
+
+%end
+
+%hook AVPlayerItem
+
++ (instancetype)playerItemWithURL:(NSURL *)URL {
+    if (gWVDHookMode != WVDHookModeOff && WVDIsEnabled()) {
+        NSString *extension = URL.pathExtension.lowercaseString;
+        WVDMarkEvent([NSString stringWithFormat:@"item %@", extension.length ? extension : @"?"]);
+        [[WVDVideoURLStore sharedStore] considerAssetURL:URL];
+        WVDShowOverlayIfFullScreen();
+    }
+    return %orig;
+}
+
+- (instancetype)initWithURL:(NSURL *)URL
+   automaticallyLoadedAssetKeys:(NSArray<NSString *> *)automaticallyLoadedAssetKeys {
+    if (gWVDHookMode != WVDHookModeOff && WVDIsEnabled()) {
+        NSString *extension = URL.pathExtension.lowercaseString;
+        WVDMarkEvent([NSString stringWithFormat:@"item %@", extension.length ? extension : @"?"]);
+        [[WVDVideoURLStore sharedStore] considerAssetURL:URL];
+        WVDShowOverlayIfFullScreen();
+    }
+    return %orig;
 }
 
 %end

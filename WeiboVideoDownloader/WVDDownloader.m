@@ -19,6 +19,7 @@
 
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
+#import <AVFoundation/AVFoundation.h>
 
 #pragma mark - UI 小工具
 
@@ -99,6 +100,7 @@ static NSString *WVDQualityDescription(NSInteger quality) {
 @interface WVDDownloader ()
 
 - (void)_beginDownloadWithCandidate:(WVDVideoCandidate *)candidate;
+- (void)_beginHLSExportWithCandidate:(WVDVideoCandidate *)candidate;
 - (void)_saveVideoToPhotoLibrary:(NSURL *)fileURL;
 - (void)_handleAuthorizationStatus:(PHAuthorizationStatus)status fileURL:(NSURL *)fileURL;
 - (void)_showInfoWithTitle:(NSString *)title detail:(NSString *)detail autoDismiss:(BOOL)autoDismiss;
@@ -154,6 +156,12 @@ static NSString *WVDQualityDescription(NSInteger quality) {
 #pragma mark - 下载
 
 - (void)_beginDownloadWithCandidate:(WVDVideoCandidate *)candidate {
+    // HLS（.m3u8）不能直接当文件下载，先交给系统导出成 mp4
+    if (candidate.isHLS) {
+        [self _beginHLSExportWithCandidate:candidate];
+        return;
+    }
+
     // 复用原始请求：微博 CDN 一般会校验 Referer / Cookie
     NSMutableURLRequest *request = candidate.request
         ? [candidate.request mutableCopy]
@@ -212,6 +220,51 @@ static NSString *WVDQualityDescription(NSInteger quality) {
         }];
 
     [task resume];
+}
+
+/// HLS 下载：让系统把 m3u8 拉下来并导出为本地 mp4
+- (void)_beginHLSExportWithCandidate:(WVDVideoCandidate *)candidate {
+    NSMutableDictionary *options = [NSMutableDictionary dictionary];
+    NSDictionary *headers = candidate.request.allHTTPHeaderFields;
+    if (headers.count > 0) {
+        // 微博 CDN 会校验 Referer，把抓到的头原样带上
+        options[@"AVURLAssetHTTPHeaderFieldsKey"] = headers;
+    }
+
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:candidate.url options:options];
+
+    NSString *fileName = [NSString stringWithFormat:@"wvd_%@.mp4", [NSUUID UUID].UUIDString];
+    NSURL *outputURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:fileName]];
+
+    NSString *preset = AVAssetExportPresetHighestQuality;
+    NSArray<NSString *> *presets = [AVAssetExportSession exportPresetsCompatibleWithAsset:asset];
+    if (![presets containsObject:preset]) {
+        preset = AVAssetExportPresetMediumQuality;
+    }
+
+    AVAssetExportSession *session = [AVAssetExportSession exportSessionWithAsset:asset
+                                                                     presetName:preset];
+    if (session == nil) {
+        [self _showFailureWithDetail:@"无法创建 HLS 导出任务"];
+        return;
+    }
+    session.outputURL = outputURL;
+    session.outputFileType = AVFileTypeMPEG4;
+
+    __weak typeof(self) weakSelf = self;
+    [session exportAsynchronouslyWithCompletionHandler:^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) return;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (session.status == AVAssetExportSessionStatusCompleted) {
+                [strongSelf _saveVideoToPhotoLibrary:outputURL];
+            } else {
+                [strongSelf _showFailureWithDetail:[NSString stringWithFormat:@"HLS 转换 MP4 失败（status=%ld）",
+                                                     (long)session.status]];
+            }
+        });
+    }];
 }
 
 #pragma mark - 保存到相册

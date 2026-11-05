@@ -21,6 +21,8 @@
 @property (nonatomic, assign) NSInteger quality;
 /// 抓取时间
 @property (nonatomic, strong) NSDate *capturedAt;
+/// 是否为 HLS（.m3u8）；是的话下载时用 AVAssetExportSession 导出成 mp4
+@property (nonatomic, assign) BOOL isHLS;
 
 + (instancetype)candidateWithURL:(NSURL *)url request:(NSURLRequest *)request;
 
@@ -39,6 +41,9 @@
 
 /// 记录 AVURLAsset / 播放器使用的资源地址
 - (void)considerURL:(NSURL *)url headerFields:(NSDictionary *)headerFields;
+
+/// 记录播放器真正加载的资源地址（mp4 或 m3u8），比网络层抓取更准确
+- (void)considerAssetURL:(NSURL *)url;
 
 /// 从 JSON 响应中兜底提取 MP4 直链（微博视频信息接口的 playback_list 等）
 /// 只遍历字符串值，不改动任何 JSON 对象本身

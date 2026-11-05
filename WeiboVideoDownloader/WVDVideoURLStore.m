@@ -17,14 +17,13 @@ static const NSTimeInterval kWVDCandidateLifetime = 180.0;
 
 #pragma mark - URL 判断与画质评分
 
-/// 是否为微博视频直链
+/// 是否为微博视频资源：MP4 直链或 HLS 播放列表
 static BOOL WVDURLIsWeiboVideo(NSURL *url) {
     if (url == nil) return NO;
 
     NSString *absolute = url.absoluteString.lowercaseString;
     if (absolute.length == 0) return NO;
-    // 必须是 MP4 文件（微博视频直链一定是 .mp4）
-    if (![absolute containsString:@".mp4"]) return NO;
+    if (![absolute containsString:@".mp4"] && ![absolute containsString:@".m3u8"]) return NO;
 
     NSString *host = url.host.lowercaseString;
     if (host.length == 0) return NO;
@@ -86,7 +85,12 @@ static NSInteger WVDQualityScoreForURL(NSURL *url) {
     candidate.url = url;
     candidate.request = request;
     candidate.capturedAt = [NSDate date];
+    candidate.isHLS = [url.absoluteString.lowercaseString containsString:@".m3u8"];
     candidate.quality = WVDQualityScoreForURL(url);
+    // HLS 地址里通常没有画质参数，给一个中等分值，避免被判成最差
+    if (candidate.isHLS && candidate.quality <= 1) {
+        candidate.quality = 720;
+    }
     return candidate;
 }
 
@@ -145,6 +149,11 @@ static NSInteger WVDQualityScoreForURL(NSURL *url) {
         }];
     }
     [self _addRequest:request];
+}
+
+- (void)considerAssetURL:(NSURL *)url {
+    if (!WVDURLIsWeiboVideo(url)) return;
+    [self _addRequest:[NSURLRequest requestWithURL:url]];
 }
 
 - (void)considerJSONObject:(id)object {
