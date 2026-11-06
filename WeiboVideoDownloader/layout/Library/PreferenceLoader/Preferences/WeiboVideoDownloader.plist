@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- PreferenceLoader 入口：在“设置”里显示“微博视频下载器” -->
+	<key>entry</key>
+	<dict>
+		<key>bundle</key>
+		<string>WeiboVideoDownloaderPrefs</string>
+		<key>cell</key>
+		<string>PSLinkCell</string>
+		<key>label</key>
+		<string>微博视频下载器</string>
+	</dict>
+</dict>
+</plist>

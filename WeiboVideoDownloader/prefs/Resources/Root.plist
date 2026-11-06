@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>微博视频下载器</string>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>下载设置</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>启用下载功能</string>
+			<key>key</key>
+			<string>enabled</string>
+			<key>defaults</key>
+			<string>com.wvd.weibovideo</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.wvd.weibovideo/prefsChanged</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>显示下载提示弹窗</string>
+			<key>key</key>
+			<string>showAlerts</string>
+			<key>defaults</key>
+			<string>com.wvd.weibovideo</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.wvd.weibovideo/prefsChanged</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>使用说明</string>
+			<key>footerText</key>
+			<string>播放微博视频后，播放器右上角会出现【下载】按钮；也可以在视频分享菜单里点【下载视频】。下载完成后自动保存到系统相册。只识别微博 CDN 上的 MP4 直链，不修改、不拦截微博的其它网络请求。修改开关后建议结束微博进程重新打开。</string>
+		</dict>
+	</array>
+</dict>
+</plist>

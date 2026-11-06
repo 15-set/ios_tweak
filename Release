@@ -1,0 +1,16 @@
+Origin: 15
+Label: 15
+Suite: stable
+Version: 1.0
+Codename: ios
+Architectures: iphoneos-arm64 iphoneos-arm64e
+Components: main
+Description: 15
+Support: https://15-set.github.io/ios_tweak/
+Icon: https://15-set.github.io/ios_tweak/CydiaIcon.png
+MD5Sum:
+ cea6b0fd23d91ceba49bc291c9124e8e  881 Packages
+ 41a8286f0b49745ec314325d9ee2021f  706 Packages.gz
+SHA256:
+ 81f477690558fada8fee84a693c6e759757a39e112fb6d0322fc2ab7bcf5a3f0  881 Packages
+ a88034d37443f881f2ea457c0bc67106c5c2a51ad992644f2c37845a33705911  706 Packages.gz

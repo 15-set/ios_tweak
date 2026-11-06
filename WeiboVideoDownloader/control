@@ -1,0 +1,9 @@
+Package: com.wvd.weibovideo
+Name: 微博视频下载器
+Version: 0.0.9
+Architecture: iphoneos-arm64
+Description: 在微博视频播放器/分享菜单中增加【下载】入口，自动抓取微博 CDN 的 MP4 直链（优先最高画质），后台下载完成后保存到系统相册。只注入微博（com.sina.weibo），不修改、不拦截微博的其它网络请求。
+Maintainer: WVD
+Author: WVD
+Section: Tweaks
+Depends: firmware (>= 15.0), ellekit | mobilesubstrate, preferenceloader
