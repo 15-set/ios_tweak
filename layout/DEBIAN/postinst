@@ -1,0 +1,11 @@
+#!/bin/sh
+# [NEW] 安装后刷新图标缓存: 让随包内嵌的 ChargeLimiter.app 被 LaunchServices 注册,
+#        Insulation 面板里的「打开 ChargeLimiter」按钮才能直接拉起它。
+#        找不到 uicache 也不报错(部分精简越狱没有该命令, 重启后系统也会自行注册)。
+set +e
+for u in /var/jb/usr/bin/uicache /usr/bin/uicache /var/jb/usr/sbin/uicache /usr/sbin/uicache; do
+    if [ -x "$u" ]; then
+        "$u" -a >/dev/null 2>&1 && break
+    fi
+done
+exit 0

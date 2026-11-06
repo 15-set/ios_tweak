@@ -14,6 +14,7 @@
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreFoundation/CFNotificationCenter.h>
+#import <dlfcn.h>   /* [NEW] 打开内嵌 ChargeLimiter.app 时动态取 LSApplicationWorkspace */
 
 /* [BUILD-FIX] 与原 Tweak.x 同一问题: theos 的 libroot 没有 jbroot(), 真实 API 是
  * JBROOT_PATH_NSSTRING; 且静态 NSString 常量不能用函数初始化 → 改惰性函数。
@@ -194,6 +195,45 @@ static NSString *InsPrefsPath(void) {
         menu.popoverPresentationController.sourceRect = cell.bounds;
     }
     [self presentViewController:menu animated:YES completion:nil];
+}
+
+#pragma mark - [NEW] ChargeLimiter 功能页入口
+
+/* [NEW] Root.plist 里的 PSButtonCell(action=openChargeLimiter:) → 打开随 deb 内嵌的
+ *       ChargeLimiter.app (bundle id: com.chargelimiter.mod, URL scheme: cl://)。
+ *       走 LSApplicationWorkspace 而不是 openURL:
+ *         Settings.app 的 Info.plist 没有登记 cl 到 LSApplicationQueriesSchemes,
+ *         canOpenURL 会返回 NO, 但 openApplicationWithBundleID 不受该白名单限制。
+ *       不修改 ChargeLimiter 自身任何逻辑, 只是"启动它"。 */
+- (void)openChargeLimiter:(PSSpecifier *)specifier {
+    NSString *bundleID = @"com.chargelimiter.mod";
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    if (!workspaceClass) {
+        dlopen("/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_LAZY);
+        workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    }
+
+    id workspace = [workspaceClass performSelector:@selector(defaultWorkspace)];
+    SEL openSel = NSSelectorFromString(@"openApplicationWithBundleID:");
+    if (workspace && [workspace respondsToSelector:openSel]) {
+        [workspace performSelector:openSel withObject:bundleID];
+        NSLog(@"[InsulationPrefs] 已请求打开 ChargeLimiter (%@)", bundleID);
+        return;
+    }
+
+    /* 兜底: 走 URL scheme (个别机型上 LSApplicationWorkspace 未注册时) */
+    NSURL *url = [NSURL URLWithString:@"cl://"];
+    if (url) {
+        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        NSLog(@"[InsulationPrefs] 回退 cl:// 打开 ChargeLimiter");
+        return;
+    }
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"未找到 ChargeLimiter"
+                                                                  message:@"请确认 deb 安装完整（应包含 /Applications/ChargeLimiter.app），然后 respring 重试。"
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end

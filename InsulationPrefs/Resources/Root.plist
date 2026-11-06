@@ -4,6 +4,24 @@
 <dict>
 	<key>items</key>
 	<array>
+		<!-- ===== [NEW] ChargeLimiter (ipa) 功能入口: 按钮 → 打开随 deb 内嵌的 app ===== -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>充电限制 (ChargeLimiter)</string>
+			<key>footerText</key>
+			<string>点按钮打开 ChargeLimiter 功能页（充电上限、暂停充电、温度保护等），功能与原 ipa 完全一致；本插件原有温控功能不受影响。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>打开 ChargeLimiter</string>
+			<key>action</key>
+			<string>openChargeLimiter:</string>
+		</dict>
+
 		<!-- ===== 原有 cell, 与 deb 内 Root.plist (binary plist 解码) 逐项一致 ===== -->
 		<dict>
 			<key>label</key>
