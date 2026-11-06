@@ -139,8 +139,37 @@ jobs:
           set -e
           if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; fi
           echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}]"
-          make package FINALPACKAGE=1
-          deb=$(ls -t packages/*.deb | head -1)
+
+          # [PKG-DIAG] 打包依赖自检: 失败时用 ::error:: 注释暴露原因(日志需登录, 注释公开可见)
+          if [ -e "$THEOS/bin/dm.pl" ]; then
+            echo "dm.pl: 在位"
+          else
+            echo "::error::dm.pl 缺失, theos 打包脚本不在 $THEOS/bin"
+            ls "$THEOS/bin" 2>&1 | sed 's/^/::error::bin| /' | head -n 6
+          fi
+          command -v dpkg-deb >/dev/null || echo "::error::dpkg-deb 不在 PATH"
+
+          set +e
+          make package FINALPACKAGE=1 2>&1 | tee "$RUNNER_TEMP/pkg.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$rc" != "0" ]; then
+            echo "::error::make package 退出码 $rc"
+            tail -n 8 "$RUNNER_TEMP/pkg.log" | sed 's/\r$//' | sed 's/%/%25/g' | sed 's/^/::error::pkg| /'
+            # 回退: theos 的暂存目录已由上面的 make 准备完毕, 直接用 dpkg-deb 打包
+            if [ -d .theos/_ ]; then
+              mkdir -p packages
+              set +e
+              dpkg-deb -Zxz --build .theos/_ "packages/$SCHEME-manual.deb" 2>&1 | tail -n 6 | sed 's/\r$//' | sed 's/%/%25/g' | sed 's/^/::error::dpkgbuild| /'
+              set -e
+            else
+              echo "::error::.theos/_ 不存在, 无法回退打包"
+            fi
+          fi
+
+          deb=$(ls -t packages/*.deb 2>/dev/null | head -1)
+          if [ -z "$deb" ]; then echo "::error::没有任何 deb 产出"; exit 1; fi
           echo "产物: $deb ($(du -h "$deb" | cut -f1))"
           dpkg-deb -I "$deb"
           dpkg-deb -c "$deb"
