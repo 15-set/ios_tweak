@@ -166,26 +166,39 @@ jobs:
           make package FINALPACKAGE=1 2>&1 | tee "$RUNNER_TEMP/pkg.log"
           rc=${PIPESTATUS[0]}
           set -e
+          echo "== make package rc=$rc =="
+          echo "== pkg.log 最后 30 行 =="
+          tail -n 30 "$RUNNER_TEMP/pkg.log" | sed 's/\r$//' || true
+          echo "== staging 目录 =="
+          du -sh .theos/_ 2>/dev/null || true
+          ls .theos/_ 2>/dev/null | head -20 || true
 
-          if [ "$rc" != "0" ]; then
-            echo "::error::make package 退出码 $rc"
-            tail -n 8 "$RUNNER_TEMP/pkg.log" | sed 's/\r$//' | sed 's/%/%25/g' | sed 's/^/::error::pkg| /'
-            # 回退: theos 的暂存目录已由上面的 make 准备完毕, 直接用 dpkg-deb 打包
+          # 校验 theos/dm.pl 的产物: 只要 deb 缺失或不是合法 Debian 包, 就改用 dpkg-deb 重新打包
+          deb=$(ls -t packages/*.deb 2>/dev/null | head -1)
+          if [ -n "$deb" ] && dpkg-deb -I "$deb" >/dev/null 2>&1; then
+            echo "theos 打包产物有效: $deb"
+          else
+            echo "::warning::theos 打包未产出合法 deb(rc=$rc), 回退 dpkg-deb 直接打包 .theos/_"
             if [ -d .theos/_ ]; then
+              echo "== staging 内容(前 30) =="
+              find .theos/_ -maxdepth 3 | head -30
               mkdir -p packages
+              rm -f packages/*.deb
               set +e
-              dpkg-deb -Zxz --build .theos/_ "packages/$SCHEME-manual.deb" 2>&1 | tail -n 6 | sed 's/\r$//' | sed 's/%/%25/g' | sed 's/^/::error::dpkgbuild| /'
+              dpkg-deb --root-owner-group -Zxz --build .theos/_ "packages/insulation_${SCHEME}.deb" 2>&1 | tail -n 15
               set -e
             else
-              echo "::error::.theos/_ 不存在, 无法回退打包"
+              echo "::error::.theos/_ 不存在, 无法回退打包(说明 staging 阶段就失败了)"
+              exit 1
             fi
+            deb=$(ls -t packages/*.deb 2>/dev/null | head -1)
+            if [ -z "$deb" ]; then echo "::error::回退打包后仍没有 deb"; exit 1; fi
+            dpkg-deb -I "$deb" >/dev/null 2>&1 || { echo "::error::回退产物仍不是合法 deb"; exit 1; }
           fi
 
-          deb=$(ls -t packages/*.deb 2>/dev/null | head -1)
-          if [ -z "$deb" ]; then echo "::error::没有任何 deb 产出"; exit 1; fi
           echo "产物: $deb ($(du -h "$deb" | cut -f1))"
-          dpkg-deb -I "$deb"
-          dpkg-deb -c "$deb"
+          dpkg-deb -I "$deb" || true
+          dpkg-deb -c "$deb" | head -60 || true
 
       - name: 校验产物（arm64+arm64e 双切片 / ABI v2 / rootless 路径 / Info.plist）
         env:
