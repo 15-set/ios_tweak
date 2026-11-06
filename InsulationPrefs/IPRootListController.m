@@ -46,6 +46,14 @@ static NSString *InsPrefsPath(void) {
 @interface IPRootListController : PSListController
 @end
 
+/* [NEW] LSApplicationWorkspace 的私有接口声明(仅用于编译期的静态类型, 不做链接:
+ * 类与消息都走 ObjC 运行时动态解析)。用声明替代 performSelector: 是因为 theos 默认带
+ * `-Werror,-Warc-performSelector-leaks`, performSelector: 会被判为编译错误。 */
+@interface NSObject (CLAppLaunch)
++ (id)defaultWorkspace;
+- (BOOL)openApplicationWithBundleID:(NSString *)bundleIdentifier;
+@end
+
 @implementation IPRootListController
 
 /* [UPSTREAM] 与原 Swift 版相同: 优先复用已加载的 specifiers, 否则从 Root.plist 加载
@@ -213,10 +221,9 @@ static NSString *InsPrefsPath(void) {
         workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
     }
 
-    id workspace = [workspaceClass performSelector:@selector(defaultWorkspace)];
-    SEL openSel = NSSelectorFromString(@"openApplicationWithBundleID:");
-    if (workspace && [workspace respondsToSelector:openSel]) {
-        [workspace performSelector:openSel withObject:bundleID];
+    id workspace = [workspaceClass defaultWorkspace];
+    if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+        [workspace openApplicationWithBundleID:bundleID];
         NSLog(@"[InsulationPrefs] 已请求打开 ChargeLimiter (%@)", bundleID);
         return;
     }
