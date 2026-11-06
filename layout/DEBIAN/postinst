@@ -3,9 +3,17 @@
 #        Insulation 面板里的「打开 ChargeLimiter」按钮才能直接拉起它。
 #        找不到 uicache 也不报错(部分精简越狱没有该命令, 重启后系统也会自行注册)。
 set +e
+# 兜底修正可执行位(部分打包/传输环节会丢 exec 位, 丢失则 app 与 daemon 都无法启动)
+for d in /var/jb/Applications/ChargeLimiter.app /Applications/ChargeLimiter.app; do
+    if [ -d "$d" ]; then
+        chmod 755 "$d/ChargeLimiter" "$d/ChargeLimiterDaemon" 2>/dev/null
+        chmod 644 "$d/Info.plist" "$d/Assets.car" "$d/lang.json" "$d/PkgInfo" 2>/dev/null
+    fi
+done
 for u in /var/jb/usr/bin/uicache /usr/bin/uicache /var/jb/usr/sbin/uicache /usr/sbin/uicache; do
     if [ -x "$u" ]; then
         "$u" -a >/dev/null 2>&1 && break
     fi
 done
 exit 0
+

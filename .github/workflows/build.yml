@@ -278,6 +278,16 @@ jobs:
           python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print({k:d.get(k) for k in ('CFBundleIdentifier','CFBundleExecutable','CFBundlePackageType','NSPrincipalClass')})" "$bundle/Info.plist"
           test -f "$bundle/Root.plist" || { echo "FATAL: bundle 缺 Root.plist"; exit 1; }
 
+          # 内嵌 ChargeLimiter.app 校验: 必须随包安装 + 主程序与 daemon 具备可执行位
+          capp=$(find "$RUNNER_TEMP/chk" -type d -name "ChargeLimiter.app" | head -1)
+          [ -n "$capp" ] || { echo "FATAL: deb 里没有 ChargeLimiter.app"; exit 1; }
+          echo "== ChargeLimiter.app =="; echo "$capp"
+          ls -l "$capp" | head -20
+          test -x "$capp/ChargeLimiter" || { echo "FATAL: ChargeLimiter 缺可执行位"; exit 1; }
+          test -x "$capp/ChargeLimiterDaemon" || { echo "FATAL: ChargeLimiterDaemon 缺可执行位"; exit 1; }
+          python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print({'CFBundleIdentifier':d.get('CFBundleIdentifier'),'CFBundleExecutable':d.get('CFBundleExecutable'),'CFBundleURLTypes':d.get('CFBundleURLTypes')})" "$capp/Info.plist"
+          python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); ids=[i.get('CFBundleIdentifier') for i in d.get('items',[]) if i.get('cell')=='PSButtonCell']; print('面板按钮 action:',[i.get('action') for i in d.get('items',[]) if i.get('cell')=='PSButtonCell'])" "$bundle/Root.plist"
+
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v4
         with:
