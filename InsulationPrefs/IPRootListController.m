@@ -6,8 +6,8 @@
  *   [UPSTREAM] readPreferenceValue/setPreferenceValue 直接读写
  *              /var/mobile/Library/Preferences/com.be-huge.insulation-prefs.plist,
  *              并按 specifier 的 PostNotification 发 Darwin 通知。
- *   [NEW]      不支持充电状态/温度/阈值/回差判断: 「电池原生温控」只是一个布尔开关,
- *              面板只负责把该 key 写入 plist 并发出 Darwin 通知, 语义全部由 Tweak.x 处理。
+ *   [NEW]      「内置 ChargeLimiter 功能」页见 CLPrefsController.m，直接驱动随 deb
+ *              常驻的 ChargeLimiterDaemon，不再安装/打开桌面 app。
  */
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
@@ -44,14 +44,6 @@ static NSString *InsPrefsPath(void) {
 }
 
 @interface IPRootListController : PSListController
-@end
-
-/* [NEW] LSApplicationWorkspace 的私有接口声明(仅用于编译期的静态类型, 不做链接:
- * 类与消息都走 ObjC 运行时动态解析)。用声明替代 performSelector: 是因为 theos 默认带
- * `-Werror,-Warc-performSelector-leaks`, performSelector: 会被判为编译错误。 */
-@interface NSObject (CLAppLaunch)
-+ (id)defaultWorkspace;
-- (BOOL)openApplicationWithBundleID:(NSString *)bundleIdentifier;
 @end
 
 @implementation IPRootListController
@@ -203,44 +195,6 @@ static NSString *InsPrefsPath(void) {
         menu.popoverPresentationController.sourceRect = cell.bounds;
     }
     [self presentViewController:menu animated:YES completion:nil];
-}
-
-#pragma mark - [NEW] ChargeLimiter 功能页入口
-
-/* [NEW] Root.plist 里的 PSButtonCell(action=openChargeLimiter:) → 打开随 deb 内嵌的
- *       ChargeLimiter.app (bundle id: com.chargelimiter.mod, URL scheme: cl://)。
- *       走 LSApplicationWorkspace 而不是 openURL:
- *         Settings.app 的 Info.plist 没有登记 cl 到 LSApplicationQueriesSchemes,
- *         canOpenURL 会返回 NO, 但 openApplicationWithBundleID 不受该白名单限制。
- *       不修改 ChargeLimiter 自身任何逻辑, 只是"启动它"。 */
-- (void)openChargeLimiter:(PSSpecifier *)specifier {
-    NSString *bundleID = @"com.chargelimiter.mod";
-    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
-    if (!workspaceClass) {
-        dlopen("/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_LAZY);
-        workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
-    }
-
-    id workspace = [workspaceClass defaultWorkspace];
-    if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-        [workspace openApplicationWithBundleID:bundleID];
-        NSLog(@"[InsulationPrefs] 已请求打开 ChargeLimiter (%@)", bundleID);
-        return;
-    }
-
-    /* 兜底: 走 URL scheme (个别机型上 LSApplicationWorkspace 未注册时) */
-    NSURL *url = [NSURL URLWithString:@"cl://"];
-    if (url) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        NSLog(@"[InsulationPrefs] 回退 cl:// 打开 ChargeLimiter");
-        return;
-    }
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"未找到 ChargeLimiter"
-                                                                  message:@"请确认 deb 安装完整（应包含 /Applications/ChargeLimiter.app），然后 respring 重试。"
-                                                           preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end

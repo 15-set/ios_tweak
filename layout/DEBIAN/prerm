@@ -1,0 +1,16 @@
+#!/bin/sh
+# 卸载前: 停止内置 ChargeLimiterDaemon（卸载完成后由系统清理文件）
+set +e
+
+JBROOT=""
+[ -d /var/jb ] && JBROOT="/var/jb"
+PLIST="$JBROOT/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+
+for lc in "$JBROOT/usr/bin/launchctl" /usr/bin/launchctl /bin/launchctl; do
+    [ -x "$lc" ] || continue
+    "$lc" bootout system "$PLIST" >/dev/null 2>&1
+    break
+done
+
+killall -9 ChargeLimiterDaemon >/dev/null 2>&1
+exit 0

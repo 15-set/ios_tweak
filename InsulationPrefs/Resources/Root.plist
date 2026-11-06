@@ -4,22 +4,22 @@
 <dict>
 	<key>items</key>
 	<array>
-		<!-- ===== [NEW] ChargeLimiter (ipa) 功能入口: 按钮 → 打开随 deb 内嵌的 app ===== -->
+		<!-- ===== 内置 ChargeLimiter 功能: 全部在本插件页面内完成, 不安装/不打开桌面 app ===== -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>充电限制 (ChargeLimiter)</string>
+			<string>内置 ChargeLimiter 功能</string>
 			<key>footerText</key>
-			<string>点按钮打开 ChargeLimiter 功能页（充电上限、暂停充电、温度保护等），功能与原 ipa 完全一致；本插件原有温控功能不受影响。</string>
+			<string>内置 ChargeLimiter 功能：充电上限、回充下限、暂停/恢复充电、温度保护均可在此直接设置并生效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSButtonCell</string>
+			<string>PSLinkCell</string>
 			<key>label</key>
-			<string>打开 ChargeLimiter</string>
-			<key>action</key>
-			<string>openChargeLimiter:</string>
+			<string>充电限制</string>
+			<key>detail</key>
+			<string>CLPrefsController</string>
 		</dict>
 
 		<!-- ===== 原有 cell, 与 deb 内 Root.plist (binary plist 解码) 逐项一致 ===== -->
@@ -116,53 +116,6 @@
 			<string>thermalSunlightLockedEnabled</string>
 		</dict>
 
-		<!-- ===== [NEW] 电池原生温控 (单一开关, 无阈值/无回差) ===== -->
-		<dict>
-			<key>label</key>
-			<string>电池</string>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>打开：电池温控永久交还系统原生策略（不区分充电状态、不比较温度、无阈值与回差）。关闭：完全恢复插件原本行为。无论开关如何设置，CPU 均不会被温控降频。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>label</key>
-			<string>电池原生温控</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.be-huge.insulation-prefs</string>
-			<key>key</key>
-			<string>chragingBatteryThermalProtect</string>
-			<key>PostNotification</key>
-			<string>com.be-huge.insulation-batteryProtectChanged</string>
-		</dict>
-
-		<!-- ===== [NEW] 充电原生温控: 独立开关, 只按「是否插线」切换, 不比较温度/无阈值/无回差 ===== -->
-		<dict>
-			<key>label</key>
-			<string>充电保护</string>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>打开：检测到充电（插着电源）时，本插件全部原有温控功能立即失效，回到系统原生温控；拔掉充电器后自动恢复你上面设置的全部功能。关闭：完全不影响原有逻辑，插件照常运行。此开关独立生效，可随时手动开关。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>label</key>
-			<string>充电原生温控开关</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.be-huge.insulation-prefs</string>
-			<key>key</key>
-			<string>chargingNativeThermalEnabled</string>
-			<key>PostNotification</key>
-			<string>com.be-huge.insulation-chargeNativeChanged</string>
-		</dict>
 	</array>
 	<key>title</key>
 	<string>Insulation</string>

@@ -1,19 +1,64 @@
 #!/bin/sh
-# [NEW] 安装后刷新图标缓存: 让随包内嵌的 ChargeLimiter.app 被 LaunchServices 注册,
-#        Insulation 面板里的「打开 ChargeLimiter」按钮才能直接拉起它。
-#        找不到 uicache 也不报错(部分精简越狱没有该命令, 重启后系统也会自行注册)。
+# 安装后: 注册内置 ChargeLimiterDaemon（不再安装/打开桌面 ChargeLimiter.app）
+# 注意: 若作业已在运行则保持不动，避免升级时打断正在使用的充电控制。
 set +e
-# 兜底修正可执行位(部分打包/传输环节会丢 exec 位, 丢失则 app 与 daemon 都无法启动)
-for d in /var/jb/Applications/ChargeLimiter.app /Applications/ChargeLimiter.app; do
-    if [ -d "$d" ]; then
-        chmod 755 "$d/ChargeLimiter" "$d/ChargeLimiterDaemon" 2>/dev/null
-        chmod 644 "$d/Info.plist" "$d/Assets.car" "$d/lang.json" "$d/PkgInfo" 2>/dev/null
-    fi
-done
-for u in /var/jb/usr/bin/uicache /usr/bin/uicache /var/jb/usr/sbin/uicache /usr/sbin/uicache; do
-    if [ -x "$u" ]; then
-        "$u" -a >/dev/null 2>&1 && break
-    fi
-done
-exit 0
 
+JBROOT=""
+[ -d /var/jb ] && JBROOT="/var/jb"
+
+DAEMON="$JBROOT/usr/libexec/insulation/ChargeLimiterDaemon"
+LANGJSON="$JBROOT/usr/libexec/insulation/lang.json"
+PLISTDIR="$JBROOT/Library/LaunchDaemons"
+PLIST="$PLISTDIR/com.chargelimiter.mod.plist"
+
+# 1) 可执行位兜底
+chmod 755 "$DAEMON" 2>/dev/null
+chmod 644 "$LANGJSON" 2>/dev/null
+
+# 2) 数据目录（rootless 下路径带 /var/jb 前缀，daemon 通过 libroot 解析）
+mkdir -p "$JBROOT/var/mobile/Library/Preferences" 2>/dev/null
+mkdir -p "$JBROOT/var/mobile/Library/Application Support/ChargeLimiter" 2>/dev/null
+mkdir -p "$JBROOT/var/mobile/ChargeLimiter" 2>/dev/null
+chown mobile:mobile "$JBROOT/var/mobile/ChargeLimiter" 2>/dev/null
+chown -R mobile:mobile "$JBROOT/var/mobile/Library/Application Support/ChargeLimiter" 2>/dev/null
+
+# 3) 生成 launchd plist（Program 路径按 rootless/rootful 实际位置写入）
+mkdir -p "$PLISTDIR" 2>/dev/null
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.chargelimiter.mod</string>
+	<key>Program</key>
+	<string>$DAEMON</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DYLD_LIBRARY_PATH</key>
+		<string>$JBROOT/usr/lib:/usr/lib</string>
+		<key>DYLD_FALLBACK_LIBRARY_PATH</key>
+		<string>$JBROOT/usr/lib:/usr/lib</string>
+	</dict>
+</dict>
+</plist>
+EOF
+chmod 644 "$PLIST" 2>/dev/null
+
+# 4) 已在运行则保持不动；未运行才引导
+for lc in "$JBROOT/usr/bin/launchctl" /usr/bin/launchctl /bin/launchctl; do
+    [ -x "$lc" ] || continue
+    if "$lc" print system/com.chargelimiter.mod >/dev/null 2>&1; then
+        break
+    fi
+    "$lc" bootstrap system "$PLIST" >/dev/null 2>&1 || "$lc" load -w "$PLIST" >/dev/null 2>&1
+    break
+done
+
+exit 0

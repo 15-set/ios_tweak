@@ -1,8 +1,8 @@
 Package: com.be-huge.insulation
 Name: insulation
-Version: 0.0.21
+Version: 0.0.22
 Architecture: iphoneos-arm
-Description: 解除温控，一切从简即可。新增「电池原生温控」「充电原生温控开关」，并内置 ChargeLimiter 功能页入口（充电上限/暂停充电等，功能与原 ipa 一致）。代码基于开源项目 https://github.com/be-huge/insulation 重建
+Description: 解除温控，一切从简即可。内置 ChargeLimiter 功能（充电上限、回充下限、暂停/恢复充电、温度保护），全部在插件页面内直接生效，不安装也不打开桌面 app。代码基于开源项目 https://github.com/be-huge/insulation 重建
 Maintainer: doimty
 Author: be-huge & doimty
 Section: Tweaks

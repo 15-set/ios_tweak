@@ -1,6 +1,6 @@
 /*
  * =====================================================================================
- *  Insulation (解除温控) — Logos 重建版 + 「电池原生温控」开关
+ *  Insulation (解除温控) — Logos 重建版
  * =====================================================================================
  *
  *  原插件: com.be-huge.insulation 0.0.18 (rootless, Swift/Orion 编译产物)
@@ -97,25 +97,12 @@ static void InsDebugLog(NSString *fmt, ...) {
 #define kInsNotifExecutePuppet   "com.be-huge.insulation-executePuppetEvent"
 #define kInsNotifRuntimeState    "com.be-huge.insulation.runtimeState"
 #define kInsNotifRestartTM       "com.be-huge.insulation-restartThermalMonitor"
-/* [NEW] 新增设置项变更通知 (由新面板 cell 的 PostNotification 发出) */
-#define kInsNotifBatteryChanged  "com.be-huge.insulation-batteryProtectChanged"
-/* [NEW] 充电原生温控开关变更通知 (由面板 cell 的 PostNotification 发出) */
-#define kInsNotifChargeNativeChanged "com.be-huge.insulation-chargeNativeChanged"
-
 /* 原有偏好 key (deb Root.plist 为证) */
 #define kPrefPowerMode                    @"thermalPowerMode"                    // off/lowPower/fullPower
 #define kPrefPreventDimming               @"thermalPreventDimmingEnabled"
 #define kPrefSuppressNotifications        @"thermalSuppressNotificationsEnabled"
 #define kPrefDisablePocketSunlight        @"thermalDisablePocketSunlightEnabled"
 #define kPrefSunlightLocked               @"thermalSunlightLockedEnabled"
-
-/* [NEW] 开关 key (沿用历史 key 名, 不改名以免旧配置失效)
- *        语义: YES = 电池温控永久交还系统原生 / NO = 完全恢复插件原行为 */
-#define kPrefChargingBatteryProtect       @"chragingBatteryThermalProtect"       // [NEW] 开关, 默认 NO
-
-/* [NEW] 充电原生温控开关 key (完全独立于上面的电池开关)
- *        语义: YES = 充电时禁用插件全部原有温控功能 / 拔出充电器自动恢复；NO = 完全不影响原逻辑 */
-#define kPrefChargeNativeEnabled          @"chargingNativeThermalEnabled"       // [NEW] 开关, 默认 NO
 
 #pragma mark - 目标类声明 (来自上游 insulationC/include/Power_header 目录下的头文件, [UPSTREAM])
 
@@ -223,92 +210,7 @@ static unsigned gObservedComponentPowerGlobalMax = 0;
 
 static int gRuntimeStateToken = 0;   /* notify_set_state token, [EVIDENCE] com.be-huge.insulation.runtimeState */
 
-#pragma mark - [NEW] 电池原生温控 开关状态
-
-/* [NEW]
- *   gChargingProtectEnabled = YES → 电池温控事件永久放行给系统原生 (%orig)
- *   gChargingProtectEnabled = NO  → 完全恢复插件原行为(继续吞掉电池温度事件)
- *   gBatteryThermalReleased  —— 上面开关的直通副本, 供 hook 热路径读取
- * 说明: 不区分充电状态、不比较温度、无阈值/回差; CPU 路径永不受这个开关影响。
- */
-static BOOL gChargingProtectEnabled = NO;     /* [NEW] key: chragingBatteryThermalProtect, 默认 NO */
-static BOOL gBatteryThermalReleased  = NO;    /* NO=插件接管(原行为) / YES=电池温控已永久交还原生 */
-
-#pragma mark - [NEW] 充电原生温控 开关状态 + 用户原始设置快照
-
-/*
- * [NEW] 充电原生温控开关 (key: chargingNativeThermalEnabled), 完全独立:
- *   开关 ON  且 设备正在充电 → gChargeNativeActive=YES → 所有有效设置被压成"原生/关闭"
- *   开关 ON  且 已拔出充电器 → gChargeNativeActive=NO  → 自动恢复下面快照里的用户设置
- *   开关 OFF                → 完全不参与运算, 原逻辑一字未改(等价于原插件)
- *
- * 实现方式: 把"用户真实设置"存进 gRaw* 快照, 再把"真正生效的设置"写进原有的
- * gPowerMode / gPreventDimming / ... 全局量。所有既有 hook 仍只读这些有效值,
- * 因此原有温控代码路径不需要任何改动。
- */
-static InsPowerMode gRawPowerMode = InsPowerModeOff;   /* 用户原始设置快照 */
-static BOOL          gRawPreventDimming = NO;
-static BOOL          gRawSuppressNotifications = NO;
-static BOOL          gRawDisablePocketSunlight = NO;
-static BOOL          gRawSunlightLocked = NO;
-static BOOL          gRawBatteryReleased = NO;
-
-static BOOL gChargeNativeSwitch  = NO;   /* 新开关本身: 面板写入的原始值 */
-static BOOL gChargeNativeActive  = NO;   /* 新开关 且 正在充电 → 强制原生 */
-static BOOL gDeviceCharging      = NO;   /* 设备当前是否处于充电状态 (IOKit 读取) */
-static dispatch_source_t gChargeTimer = NULL;
-
-#pragma mark - [NEW] 充电状态检测 (IOKit AppleSmartBattery.ExternalConnected)
-
-/* [NEW] 不依赖 runloop, 同步读 IOKit 注册表: thermalmonitord 是 root daemon, 可直接访问。
- *   AppleSmartBattery 的 ExternalConnected = 是否接着外部电源(含满电仍插着的情况)。
- *   IsCharging 只在"正在充"时为真, 满电后会变 false, 因此两者取或才能覆盖"插着线"的语义。 */
-static BOOL InsReadChargingFromIORegistry(void) {
-    BOOL connected = NO;
-    io_service_t svc = IOServiceGetMatchingService(MACH_PORT_NULL, IOServiceMatching("AppleSmartBattery"));
-    if (!svc) return NO;
-
-    CFTypeRef v = IORegistryEntryCreateCFProperty(svc, CFSTR("ExternalConnected"),
-                                                  kCFAllocatorDefault, 0);
-    if (v) {
-        if (CFGetTypeID(v) == CFBooleanGetTypeID()) {
-            connected = CFBooleanGetValue((CFBooleanRef)v);
-        } else if (CFGetTypeID(v) == CFNumberGetTypeID()) {
-            int n = 0;
-            CFNumberGetValue((CFNumberRef)v, kCFNumberIntType, &n);
-            connected = (n != 0);
-        }
-        CFRelease(v);
-    }
-    IOObjectRelease(svc);
-    return connected;
-}
-
 #pragma mark - 偏好读取
-
-/* [NEW] 由 gRaw* 快照 + (开关 && 充电) 计算真正生效的设置。调用方必须已持有 gLock。 */
-static void InsRecomputeEffectiveLocked(void) {
-    BOOL forceNative = (gChargeNativeSwitch && gDeviceCharging);
-    gChargeNativeActive = forceNative;
-
-    if (forceNative) {
-        /* 充电中: 插件全部原有温控功能一律失效, 只剩这个开关本身可用 */
-        gPowerMode             = InsPowerModeOff;
-        gPreventDimming        = NO;
-        gSuppressNotifications = NO;
-        gDisablePocketSunlight = NO;
-        gSunlightLocked        = NO;
-        gBatteryThermalReleased = NO;
-    } else {
-        /* 未充电 或 开关关闭: 完全恢复用户原始设置 */
-        gPowerMode             = gRawPowerMode;
-        gPreventDimming        = gRawPreventDimming;
-        gSuppressNotifications = gRawSuppressNotifications;
-        gDisablePocketSunlight = gRawDisablePocketSunlight;
-        gSunlightLocked        = gRawSunlightLocked;
-        gBatteryThermalReleased = gRawBatteryReleased;
-    }
-}
 
 static void InsReloadPrefs(void) {
     NSString *path = InsPrefsPath();
@@ -320,48 +222,23 @@ static void InsReloadPrefs(void) {
     os_unfair_lock_lock(&gLock);
 
     NSString *mode = [p[kPrefPowerMode] isKindOfClass:[NSString class]] ? p[kPrefPowerMode] : @"off";
-    if ([mode isEqualToString:@"lowPower"])       gRawPowerMode = InsPowerModeLowPower;
-    else if ([mode isEqualToString:@"fullPower"]) gRawPowerMode = InsPowerModeFullPower;
-    else                                          gRawPowerMode = InsPowerModeOff;
+    if ([mode isEqualToString:@"lowPower"])       gPowerMode = InsPowerModeLowPower;
+    else if ([mode isEqualToString:@"fullPower"]) gPowerMode = InsPowerModeFullPower;
+    else                                          gPowerMode = InsPowerModeOff;
 
-    gRawPreventDimming        = [p[kPrefPreventDimming] boolValue];
-    gRawSuppressNotifications = [p[kPrefSuppressNotifications] boolValue];
-    gRawDisablePocketSunlight = [p[kPrefDisablePocketSunlight] boolValue];
-    gRawSunlightLocked        = [p[kPrefSunlightLocked] boolValue];
-
-    /* [NEW] 开关默认关闭; 打开 = 电池温控永久交还原生, 关闭 = 恢复插件原行为。
-     *       直通赋值: 不做任何充电状态 / 温度 / 阈值 / 回差判断。 */
-    BOOL enabled = [p[kPrefChargingBatteryProtect] boolValue];
-    gChargingProtectEnabled = enabled;
-    gRawBatteryReleased = enabled;
-
-    /* [NEW] 充电原生温控开关: 只读原始值, 是否强制原生由 InsRecomputeEffectiveLocked 决定 */
-    gChargeNativeSwitch = [p[kPrefChargeNativeEnabled] boolValue];
-
-    BOOL wasReleased = gBatteryThermalReleased;
-    InsRecomputeEffectiveLocked();
+    gPreventDimming        = [p[kPrefPreventDimming] boolValue];
+    gSuppressNotifications = [p[kPrefSuppressNotifications] boolValue];
+    gDisablePocketSunlight = [p[kPrefDisablePocketSunlight] boolValue];
+    gSunlightLocked        = [p[kPrefSunlightLocked] boolValue];
 
     os_unfair_lock_unlock(&gLock);
 
     /* [DIAG] 每次重载都打印实际读到的值, 与面板侧 "已同步" 日志成对定位 */
     ILog(@"读取偏好: path=%@ thermalPowerMode=%@", path, mode);
-    InsDebugLog(@"读取偏好: path=%@ thermalPowerMode=%@ released=%@",
-                path, mode, enabled ? @"YES" : @"NO");
-
-    if (wasReleased != enabled) {
-        ILog(@"电池温控控制权: %@ | 开关=%@ | CPU 路径不受影响(永不放行)",
-             enabled ? @"已永久交还原生" : @"插件接管(原行为)",
-             enabled ? @"开" : @"关");
-    }
-
-    /* [NEW] 充电原生温控开关状态日志 */
-    ILog(@"充电原生温控: 开关=%@ 充电中=%@ 强制原生=%@",
-         gChargeNativeSwitch ? @"开" : @"关",
-         gDeviceCharging ? @"是" : @"否",
-         gChargeNativeActive ? @"是" : @"否");
+    InsDebugLog(@"读取偏好: path=%@ thermalPowerMode=%@", path, mode);
 }
 
-#pragma mark - [NEW] 电池温度传感器识别 (用于只放开电池这一路)
+#pragma mark - 电池温度传感器识别 (用于只放开电池这一路)
 
 /*
  * 原插件在 HidSensors handleTemperatureEvent:service: 吞掉【所有】HID 温度传感器事件,
@@ -819,17 +696,13 @@ static BOOL InsShouldSuppressThermal(void) {
 /* [FIX-CHARGING] 原先无条件吞掉全部温度事件 —— 电池温度也被拦, CPMS 拿不到电池温度
  *   → 插线后不充电 / 电流无反应, 这是"充不进电"的头号原因。
  *   现改为:
- *     · 「电池原生温控」开关打开 且 事件来自电池传感器 → 永远放行(用户显式要求)
+ *     · 事件来自电池传感器 → 永远放行(保证插线充电不被电池温度事件拦死)
  *     · fullPower / 防暗屏 → 才吞掉(解除温控, 原版语义)
  *     · 其余模式(off / lowPower) → 直通原生, 充电与温控完全不受影响 */
 %hook HidSensors
 
 - (void)handleTemperatureEvent:(int)temp service:(id)service {
-    os_unfair_lock_lock(&gLock);
-    BOOL released = gBatteryThermalReleased;
-    os_unfair_lock_unlock(&gLock);
-
-    if (released && InsIsBatteryThermalService(service)) {
+    if (InsIsBatteryThermalService(service)) {
         %orig;   // 电池温控交还原生: 电池传感器事件一律放行
         return;
     }
@@ -1084,115 +957,7 @@ static void InsReapplySoon(int attempt, NSString *tag);
 
 %end
 
-#pragma mark - [NEW] 充电状态监听 + 充电原生温控
-
-/*
- * [NEW] 独立开关: 充电原生温控开关 (key: chargingNativeThermalEnabled)
- *
- *   开关打开 & 插上充电器  → 本插件全部原有温控功能立即失效(等价于原插件完全没装):
- *                            CPU 模式回原生、防暗屏关闭、温控弹窗恢复、口袋/阳光检测恢复、
- *                            电池温控交回插件原行为; 仅这个开关本身仍可用(可随时关掉退出保护)。
- *   开关打开 & 拔掉充电器  → 立即恢复用户插线前的那套设置(模式/各开关), 无需重启。
- *   开关关闭              → 完全不参与, 原逻辑保持不变。
- *
- * 状态来源: IOKit AppleSmartBattery.ExternalConnected, 3 秒轮询。
- *   thermalmonitord 里没有 SpringBoard 的 UIDevice 通知可用, 轮询是最稳的进程内方案
- *   (不依赖 runloop, 也不受 daemon 沙箱限制; 轮询只读一个整型属性, 开销可忽略)。
- */
-
-static void InsApplyEffectiveSettingsNow(NSString *reason) {
-    ILog(@"充电原生温控: 应用设置 (%@)", reason);
-    InsApplyPowerMode();
-    InsApplyAdvancedSwitches();
-    InsReapplySoon(1, reason);   /* 沿用 0.25~10s 重试表, 防止 daemon 早期 controller 未就绪 */
-}
-
-static void InsPollChargingState(void) {
-    BOOL charging = InsReadChargingFromIORegistry();
-
-    os_unfair_lock_lock(&gLock);
-    BOOL changed      = (charging != gDeviceCharging);
-    BOOL switchOn     = gChargeNativeSwitch;
-    BOOL wasActive    = gChargeNativeActive;
-    if (changed) gDeviceCharging = charging;
-    if (switchOn) {
-        InsRecomputeEffectiveLocked();
-    } else if (wasActive) {
-        /* 开关刚被关闭: 撤销强制原生, 回到用户设置(幂等) */
-        InsRecomputeEffectiveLocked();
-    }
-    BOOL nowActive    = gChargeNativeActive;
-    BOOL released     = gBatteryThermalReleased;
-    os_unfair_lock_unlock(&gLock);
-
-    /* 开关关闭时不干预任何原有逻辑 */
-    if (!switchOn) return;
-    if (!changed && wasActive == nowActive) return;
-
-    ILog(@"充电状态变化: 充电=%@ | 开关=%@ | 强制原生=%@ | 电池温控释放=%@",
-         charging ? @"是" : @"否", @"开",
-         nowActive ? @"是" : @"否", released ? @"是" : @"否");
-
-    NSString *reason = nowActive ? @"charging-on" : @"charging-off";
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        InsApplyEffectiveSettingsNow(reason);
-    });
-}
-
-static void InsStartChargingMonitor(void) {
-    gDeviceCharging = InsReadChargingFromIORegistry();
-    ILog(@"充电原生温控监听启动: 当前充电=%@ 开关=%@",
-         gDeviceCharging ? @"是" : @"否",
-         gChargeNativeSwitch ? @"开" : @"关");
-
-    /* 启动时若已处于"开关开 + 充电中", 立即进入强制原生 */
-    BOOL needApply;
-    os_unfair_lock_lock(&gLock);
-    BOOL before = gChargeNativeActive;
-    InsRecomputeEffectiveLocked();
-    needApply = (gChargeNativeActive != before) || gChargeNativeActive;
-    os_unfair_lock_unlock(&gLock);
-
-    if (needApply) {
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            InsApplyEffectiveSettingsNow(@"charging-startup");
-        });
-    }
-
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                                     dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
-    if (!timer) {
-        ILog(@"充电原生温控: 定时器创建失败, 充电监听不可用");
-        return;
-    }
-    dispatch_source_set_timer(timer,
-                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                              (uint64_t)(3.0 * NSEC_PER_SEC),
-                              (uint64_t)(1.0 * NSEC_PER_SEC));
-    dispatch_source_set_event_handler(timer, ^{
-        @autoreleasepool { InsPollChargingState(); }
-    });
-    dispatch_resume(timer);
-    gChargeTimer = timer;
-}
-
-/* [NEW] 面板切换「充电原生温控开关」时: 重读 + 立刻应用(插着线时马上进入/退出保护) */
-static void InsOnChargeNativeChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
-                                     const void *object, CFDictionaryRef userInfo) {
-    ILog(@"充电原生温控开关变更通知到达");
-    InsReloadPrefs();   /* 内部会按新开关值重算 gChargeNativeActive */
-
-    /* 面板写 cfprefsd 到文件落盘有微小延迟: 0.5s 后再认一次, 保证用的是最终值 */
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        InsReloadPrefs();
-        InsApplyEffectiveSettingsNow(@"charge-native-toggle");
-    });
-
-    InsApplyEffectiveSettingsNow(@"charge-native-toggle-immediate");
-}
-
-#pragma mark - 初始化  [UPSTREAM InsulationTInit + NEW]
+#pragma mark - 初始化  [UPSTREAM InsulationTInit]
 
 /* [EVIDENCE] 0xc8bc 的重试表: d8 = [0x29e28 + i + 0x28] (double),
  *   实测常量序列 0.25 / 1 / 2 / 4 / 6 / 8 / 10 秒。
@@ -1238,13 +1003,11 @@ static void InsOnRestartRequested(CFNotificationCenterRef center, void *observer
 static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     os_unfair_lock_lock(&gLock);
     InsPowerMode beforeMode = gPowerMode;
-    BOOL beforeReleased = gBatteryThermalReleased;
     os_unfair_lock_unlock(&gLock);
 
     InsReloadPrefs();
     NSString *n = (__bridge NSString *)name;
     BOOL isPuppet  = [n isEqualToString:@kInsNotifExecutePuppet];
-    BOOL isBattery = [n isEqualToString:@kInsNotifBatteryChanged];
 
     if (isPuppet) {
         /* [UPSTREAM] executePuppetEvent → 应用 thermalPowerMode (0.0.18 的 puppet 即 power mode) */
@@ -1253,14 +1016,12 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
     }
 
     os_unfair_lock_lock(&gLock);
-    BOOL modeSame     = (gPowerMode == beforeMode);
-    BOOL releasedSame = (gBatteryThermalReleased == beforeReleased);
+    BOOL modeSame = (gPowerMode == beforeMode);
     os_unfair_lock_unlock(&gLock);
 
     /* [FIX] 面板写 cfprefsd 到文件落盘有微小延迟: 通知先到、文件还是旧值时,
-     *       0.4s 后再重读一次; 只处理确实变了的情况(幂等, 不改原语义)。
-     *       电池开关只需重读(热路径直接读 gBatteryThermalReleased), 不需要 apply。 */
-    if ((isPuppet && modeSame) || (isBattery && releasedSame)) {
+     *       0.4s 后再重读一次; 只处理确实变了的情况(幂等, 不改原语义)。 */
+    if (isPuppet && modeSame) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             InsReloadPrefs();
@@ -1269,17 +1030,13 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
             BOOL modeChanged = (gPowerMode != beforeMode);
             os_unfair_lock_unlock(&gLock);
 
-            if (isPuppet && modeChanged) {
+            if (modeChanged) {
                 ILog(@"[recheck] thermalPowerMode 已更新, 重新应用");
                 InsApplyPowerMode();
                 InsApplyAdvancedSwitches();
             }
         });
     }
-
-    /* [NEW] 「电池原生温控」开关: InsReloadPrefs 已把开关状态直通到
-     *       gBatteryThermalReleased(不做充电/温度判断), 此处无需再求值;
-     *       控制权变化日志已在 InsReloadPrefs 内输出。 */
 }
 
 %ctor {
@@ -1293,15 +1050,10 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
         /* [EVIDENCE] runtime state notify token */
         notify_register_check(kInsNotifRuntimeState, &gRuntimeStateToken);
 
-        /* Darwin 通知监听 (原插件: executePuppetEvent; [NEW] 新增 batteryProtectChanged) */
+        /* Darwin 通知监听 (原插件: executePuppetEvent) */
         CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
         CFNotificationCenterAddObserver(center, NULL, InsOnPrefsChanged,
                                         CFSTR(kInsNotifExecutePuppet), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-        CFNotificationCenterAddObserver(center, NULL, InsOnPrefsChanged,
-                                        CFSTR(kInsNotifBatteryChanged), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-        /* [NEW] 充电原生温控开关: 独立通知, 独立处理(不影响上面两条原有链路) */
-        CFNotificationCenterAddObserver(center, NULL, InsOnChargeNativeChanged,
-                                        CFSTR(kInsNotifChargeNativeChanged), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         /* [FIX] 面板切换 CPU 模式后只发信号 → 进程内重应用; 通知名沿用原版协议 */
         CFNotificationCenterAddObserver(center, NULL, InsOnRestartRequested,
                                         CFSTR(kInsNotifRestartTM), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -1313,9 +1065,6 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
          * [B] 再叠加 2s 定时兜底(最多 5 次): 即使 initForFastLoop: 未命中也能补 apply。 */
         InsApplyPowerMode();
         InsFallbackApply(1);
-
-        /* [NEW] 启动充电状态监听(3s 轮询 IOKit): 开关开且已插线 → 立刻进入强制原生 */
-        InsStartChargingMonitor();
 
         /* [DIAG] hook 前置条件自检: %hook 是运行时按类名安装的, 类找不到 → 静默失败,
          *   表现为"面板点了没反应"。把三个关键类 + controller 实例打到 Console,
@@ -1348,18 +1097,12 @@ static void InsOnPrefsChanged(CFNotificationCenterRef center, void *observer, CF
 
         os_unfair_lock_lock(&gLock);
         InsPowerMode startupMode = gPowerMode;
-        BOOL startupProtect = gChargingProtectEnabled;
-        BOOL startupReleased = gBatteryThermalReleased;
         os_unfair_lock_unlock(&gLock);
 
-        ILog(@"insulation loaded (Logos 重建版 + 电池原生温控开关) | mode=%ld | 开关=%@ | 电池温控控制权:%@ | CPU 路径不受影响(永不放行)",
-             (long)startupMode,
-             startupProtect ? @"开" : @"关",
-             startupReleased ? @"已永久交还原生" : @"插件接管(原行为)");
-        InsDebugLog(@"ctor 启动: pid=%d mode=%ld 开关=%@ 控制权=%@ mc=%p",
+        ILog(@"insulation loaded (Logos 重建版) | mode=%ld | CPU 路径不受影响(永不放行)",
+             (long)startupMode);
+        InsDebugLog(@"ctor 启动: pid=%d mode=%ld mc=%p",
                     getpid(), (long)startupMode,
-                    startupProtect ? @"开" : @"关",
-                    startupReleased ? @"已永久交还原生" : @"插件接管(原行为)",
                     (void *)(__bridge void *)gMitigationController);
     }
 }

@@ -21,7 +21,7 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = InsulationPrefs
 
-InsulationPrefs_FILES = IPRootListController.m
+InsulationPrefs_FILES = IPRootListController.m CLPrefsController.m
 InsulationPrefs_CFLAGS = -fobjc-arc
 InsulationPrefs_INSTALL_PATH = /Library/PreferenceBundles
 
