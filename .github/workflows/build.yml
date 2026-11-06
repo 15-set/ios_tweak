@@ -125,7 +125,16 @@ jobs:
           echo "== 链接器 ld =="; ld -v 2>&1 | head -2 || true
           echo "ARCHS 预期: rootless/roothide=arm64 arm64e, rootful=arm64 (见 Makefile)"
           make clean
+          set +e
           make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" != "0" ]; then
+            echo "::error::编译失败 rc=$rc"
+            grep -E "error:|fatal error|Error [0-9]+|Undefined symbol|ld: " "$RUNNER_TEMP/build.log" | tail -n 15 | sed 's/%/%25/g' | sed 's/^/::error::build| /'
+            tail -n 15 "$RUNNER_TEMP/build.log" | sed 's/%/%25/g' | sed 's/^/::error::tail| /'
+            exit 1
+          fi
           echo "== 构建里出现的 -target =="
           grep -o -E -- '-target [a-z0-9]+-apple-ios[0-9.]+' "$RUNNER_TEMP/build.log" | sort -u || true
           # 注意: 不能用 `grep -c -- '-arch arm64e' build.log` 判断 ARCHS。
