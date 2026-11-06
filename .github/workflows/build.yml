@@ -21,8 +21,8 @@ jobs:
     #   (同文件 rules.mk L125-137), 因此不再需要 IS_NEW_ABI=1 覆盖。
     # [RUNNER-FIX] macos-14 在本仓库会被解析成 arm64 机型(macos-14-arm64-us-default),
     #   当前账号不支持 → run 直接 Cancelled(2s, "configuration is not supported")。
-    #   固定用 Intel 机型标签, arm64e 仍由 Apple clang 交叉编译产出, 与机型架构无关。
-    runs-on: macos-13
+    #   固定显式 Intel 机型 (macos-15-intel)：arm64e 由 Apple clang 交叉编译产出, 与宿主架构无关。
+    runs-on: macos-15-intel
     strategy:
       fail-fast: false
       matrix:
