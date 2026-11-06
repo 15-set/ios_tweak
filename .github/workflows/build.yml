@@ -140,7 +140,16 @@ jobs:
           if [ "$SCHEME" != "rootful" ]; then export THEOS_PACKAGE_SCHEME="$SCHEME"; fi
           echo "scheme_env=[${THEOS_PACKAGE_SCHEME:-<unset, rootful default>}]"
 
-          # [PKG-DIAG] 打包依赖自检: 失败时用 ::error:: 注释暴露原因(日志需登录, 注释公开可见)
+          # [CASE-FIX] macOS 文件系统大小写不敏感:
+          #   仓库根的发布元数据文件 Packages(大写 P) 与 theos 输出目录 packages/ 同名冲突
+          #   → legacy.mk "mv debs packages" 报 "Not a directory", dm.pl 写 deb 也失败。
+          #   debs/ 会触发 legacy.mk 的 debs→packages 迁移, 构建过程并不需要它。
+          #   两者都只是 Sileo 源发布物, 编译打包不需要 → 先移出工作区。
+          if [ -e ./Packages ]; then
+            mv ./Packages "$RUNNER_TEMP/Packages.repo-meta"; echo "已移开根目录 Packages(发布元数据)"
+          fi
+          rm -rf ./debs ./packages
+          echo "清理完成: 当前根目录无 packages/debs 残留"
           if [ -e "$THEOS/bin/dm.pl" ]; then
             echo "dm.pl: 在位"
           else
