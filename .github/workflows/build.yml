@@ -2,7 +2,11 @@ name: build-insulation
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -280,3 +284,21 @@ jobs:
           name: insulation-${{ matrix.scheme }}
           path: packages/*.deb
           if-no-files-found: error
+
+      # 把 deb 发布到独立分支, 便于用 raw.githubusercontent.com 匿名下载(artifact 下载需登录)
+      - name: 发布 deb 到 artifacts 分支
+        if: github.event_name == 'push'
+        env:
+          SCHEME: ${{ matrix.scheme }}
+        run: |
+          set -e
+          deb=$(ls -t packages/*.deb | head -1)
+          name=$(basename "$deb")
+          echo "发布 $name 到分支 artifacts-$SCHEME"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan "artifacts-$SCHEME"
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          git add -f "$deb"
+          git commit -m "build: $name"
+          git push -f origin "HEAD:artifacts-$SCHEME"
