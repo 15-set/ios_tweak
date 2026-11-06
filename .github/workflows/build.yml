@@ -307,7 +307,10 @@ jobs:
           echo "== ChargeLimiterDaemon =="; echo "$cldaemon"
           test -x "$cldaemon" || { echo "FATAL: ChargeLimiterDaemon 缺可执行位"; exit 1; }
           test -f "$(dirname "$cldaemon")/lang.json" || { echo "FATAL: 缺少 lang.json"; exit 1; }
-          postinst=$(find "$RUNNER_TEMP/chk" -name postinst | head -1)
+          rm -rf "$RUNNER_TEMP/chk-ctrl" && mkdir -p "$RUNNER_TEMP/chk-ctrl"
+          dpkg-deb -e "$deb" "$RUNNER_TEMP/chk-ctrl"
+          postinst=$(find "$RUNNER_TEMP/chk-ctrl" -name postinst | head -1)
+          [ -n "$postinst" ] || { echo "FATAL: deb 缺少 postinst"; exit 1; }
           grep -q "com.chargelimiter.mod" "$postinst" || { echo "FATAL: postinst 未注册 launchd 作业"; exit 1; }
           ls "$RUNNER_TEMP/chk/Library/LaunchDaemons" 2>/dev/null | head -5 || true
           test -z "$(find "$RUNNER_TEMP/chk" -type d -name "ChargeLimiter.app" | head -1)" \
