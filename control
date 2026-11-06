@@ -1,8 +1,8 @@
 Package: com.be-huge.insulation
 Name: insulation
-Version: 0.0.19
+Version: 0.0.20
 Architecture: iphoneos-arm
-Description: 解除温控，一切从简即可。新增「电池原生温控」开关。代码基于开源项目 https://github.com/be-huge/insulation 重建
+Description: 解除温控，一切从简即可。新增「电池原生温控」与「充电原生温控开关」（充电时暂停全部温控、断电自动恢复）。代码基于开源项目 https://github.com/be-huge/insulation 重建
 Maintainer: doimty
 Author: be-huge & doimty
 Section: Tweaks

@@ -121,6 +121,30 @@
 			<key>PostNotification</key>
 			<string>com.be-huge.insulation-batteryProtectChanged</string>
 		</dict>
+
+		<!-- ===== [NEW] 充电原生温控: 独立开关, 只按「是否插线」切换, 不比较温度/无阈值/无回差 ===== -->
+		<dict>
+			<key>label</key>
+			<string>充电保护</string>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>打开：检测到充电（插着电源）时，本插件全部原有温控功能立即失效，回到系统原生温控；拔掉充电器后自动恢复你上面设置的全部功能。关闭：完全不影响原有逻辑，插件照常运行。此开关独立生效，可随时手动开关。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>充电原生温控开关</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.be-huge.insulation-prefs</string>
+			<key>key</key>
+			<string>chargingNativeThermalEnabled</string>
+			<key>PostNotification</key>
+			<string>com.be-huge.insulation-chargeNativeChanged</string>
+		</dict>
 	</array>
 	<key>title</key>
 	<string>Insulation</string>
