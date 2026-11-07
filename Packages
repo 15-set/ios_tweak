@@ -1,0 +1,17 @@
+Package: com.be-huge.insulation
+Architecture: iphoneos-arm64
+Version: 0.1.38.7
+Section: Tweaks
+Maintainer: doimty
+Installed-Size: 950
+Depends: firmware (>= 15.0)
+Filename: debs/insulation-0.1.38.7-iphoneos-arm64.deb
+Size: 116410
+MD5sum: 1e79e6e7783435d4b60bbd93ccf6e92f
+SHA1: 15f1b1cabae968521dabc866f638d0b86616b799
+SHA256: 7265fd19970fb168af9eebfdd5872935b08edb12fd44c7ea12ab8e390456d72c
+SHA512: 79521079108f619cc30e9717ee8a131570dfed6a234a8c7974bbea29e834c7bc3c63ea4054030dc8490d8431b4db26dfa3b547283892f9179be41d837d45b28e
+Description: 附加:充电时自动让位苹果原生温控,拔线自动恢复用户CPU模式
+Name: insulation
+Author: be-huge & doimty & King
+
