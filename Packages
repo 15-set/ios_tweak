@@ -1,3 +1,22 @@
+Package: com.axs.animate
+Architecture: iphoneos-arm64
+Version: 5.2.0-7
+Section: Axs-Tweaks
+Maintainer: Axs
+Installed-Size: 536
+Depends: mobilesubstrate, preferenceloader, firmware (>= 15.0)
+Filename: debs/Animate-5.2.0-7-iphoneos-arm64.deb
+Size: 70402
+MD5sum: e5aec1b94501e7f5c0d394e8dc74e6bc
+SHA1: 621a57d60ab7c2b414c8bc8d9c2929e6ac44e9d4
+SHA256: 4770793e747ec67233a8850b5e4ba79b63f789343749166e86ed52cb4a2c6d33
+SHA512: aafb615d5b59f381a5ad0a9fe257f5db00e28aedbdffc3a7ff82cb061e93b26447b234cc51a70cb6f3d386866b6d57603dc00277b669142c13a473038d7a5819
+Description: 为 iOS 15 及以上系统带来 iOS 27 风格的应用切换和通知中心动画，支持自定义动画效果、速度与强度。
+Name: com.yourepo.axs.animateios27
+Author: Axs
+Icon: https://axs66.github.io/pro/icon/animate.png
+Sileodepiction: https://axs66.github.io/pro/sileodepiction/animate/js.json
+
 Package: com.be-huge.insulation
 Architecture: iphoneos-arm64
 Version: 0.1.39.2
