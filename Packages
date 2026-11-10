@@ -1,22 +1,3 @@
-Package: com.huayuarc.cputhermal
-Architecture: iphoneos-arm64
-Version: 1.6.2-286
-Section: Tweaks
-Maintainer: Huayuarc
-Installed-Size: 2180
-Depends: mobilesubstrate, preferenceloader
-Filename: debs/CPU智能温控-1.6.2-286-iphoneos-arm64.deb
-Size: 234160
-MD5sum: 690f4c31e13f403f64e151468ee9b026
-SHA1: 172620c3218bff0d18a11d47fc3ab4ce42419517
-SHA256: 6c3d082d77bdb723b8e2a4562354f4259190a248ff2f8570b271c6dcc1ad7279
-SHA512: 31653fa2c66225bf05c8f5110dee9cd7aa79d3184c35c0eb93e845c74dcdb04970fa31e82b9a881f11bf1767d41c1ffe6135e6440c17ca5ff449fc4d9af5753c
-Description: 适用于 ios15 版本
-Name: CPU智能温控
-Author: Huayuarc
-Icon: https://raw.githubusercontent.com/qq391160/cputhermal-assets/main/IMG_1132.png
-Sileodepiction: https://huayuarc.github.io/sileodepiction/CPUthermal/js.json
-
 Package: com.be-huge.insulation
 Architecture: iphoneos-arm64
 Version: 0.1.39.2
