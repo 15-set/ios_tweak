@@ -2,5 +2,9 @@
   "insulation_充电温控.deb": {
     "name": "",
     "desc": "增加了更新日志"
+  },
+  "CPU智能温控-1.6.2-286-iphoneos-arm64.deb": {
+    "name": "",
+    "desc": "适用于 ios15 版本"
   }
 }
