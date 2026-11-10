@@ -10,5 +10,9 @@
   "Animate_仿ios27动画-5.2.0-7-iphoneos-arm64.deb": {
     "name": "Animate 仿 iOS27 动画-5.2.0-7",
     "desc": ""
+  },
+  "Animate-5.2.0-7-iphoneos-arm64.deb": {
+    "name": "com.yourepo.axs.animateios27",
+    "desc": ""
   }
 }
