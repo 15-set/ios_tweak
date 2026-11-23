@@ -14,5 +14,9 @@
   "Animate-5.2.0-7-iphoneos-arm64.deb": {
     "name": "com.yourepo.axs.animateios27",
     "desc": ""
+  },
+  "insulation_0.1.39.3_iphoneos-arm64.deb": {
+    "name": "",
+    "desc": "充电使用原生温控"
   }
 }
