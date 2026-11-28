@@ -1,7 +1,24 @@
+Package: org.coolstar.sileo
+Architecture: iphoneos-arm64e
+Version: 2.5.1-18
+Maintainer: wwg151 <wwg151@users.noreply.github.com>
+Depends: firmware (>= 11.0), firmware(>=12.2) | org.swift.libswift (>=5.0), coreutils (>= 8.30-1), dpkg (>= 1.19.4-1), apt (>= 1.8.2), libzstd1
+Filename: debs/sileo_roothide_长按下载免跳转.deb
+Size: 3519192
+MD5sum: 9a7a95a45bfcc521a58a1240999b826d
+SHA1: 200c16516dbe34bec69b4a68ceb02dbac1a6af68
+SHA256: 801175735ed1fc9a7536f7b09c7ab125abfc693a9aef9f93e987341101191a03
+SHA512: 2d959cb854cdb2625e9d68228b6cdeddb5ea0f237343196b1f2e45569eb213b01da0dca389f1e09000a596cee88bf225c8eefc9fc87fcb3f25cc913e3bb64934
+Section: Packaging
+Description: A modern APT package manager frontend
+Name: Sileo
+Author: wwg151 <wwg151@users.noreply.github.com>
+Icon: https://getsileo.app/img/icon.png
+SileoDepiction: https://featuredpage.getsileo.app/depiction.json
+
 Package: com.be-huge.insulation
 Architecture: iphoneos-arm64
 Version: 0.1.39.3
-Section: Tweaks
 Maintainer: doimty
 Installed-Size: 950
 Depends: firmware (>= 15.0)
@@ -11,44 +28,7 @@ MD5sum: cdbe41c18b2353f8980fa3405f31102f
 SHA1: 0feb798a24c9dd930960397ca4d17f4a63521c1f
 SHA256: 129c27fb92fd071c9ff681822542a758851fca721de99bfd98b6bf502ccb2c33
 SHA512: e397bf87a18d3f2a2952c080d8d9630825cd9a4be72b2a8bb127251ae82c329fc12a3281e0f46beaf8afc0ae0510db0433696f3784a6e8aa06bbe692ddaa1686
+Section: Tweaks
 Description: 充电使用原生温控
 Name: insulation
 Author: be-huge & doimty & King
-
-Package: com.be-huge.insulation
-Architecture: iphoneos-arm64e
-Version: 0.1.39.47
-Section: Tweaks
-Maintainer: doimty
-Installed-Size: 1029
-Depends: firmware (>= 15.0)
-Filename: debs/insulation_0.1.39.47_iphoneos-arm64e.deb
-Size: 198542
-MD5sum: 962a4221bcd90ddc4fb8eaa6a12145b0
-SHA1: 03c6d92b0902202adae859e78f31649bce64ffda
-SHA256: 742acd60aaf60457b9a4e50b6a6b83cb3b218eea9e447d6bf144402b03422091
-SHA512: 765d0894cb612519e7c38d38b399ce15ef2b7129062c82086931cbb93d0a5a7b6e6be5340905a5d84e846b94c12943ab0a6955faba987369b09c839e679faedd
-Description: 解除温控，一切从简即可。支持命令行切换模式：ins off（原生温控）/ ins low（低功耗）/ ins max（全性能）/ ins status（查看当前模式）
- 新增：电池温度控制（来自 ChargeLimiter）（温控增强：King）
-Name: insulation
-Author: be-huge & doimty & King
-icon: https://huayuarc.github.io/icon/Insulation.png
-
-Package: org.coolstar.sileo
-Architecture: iphoneos-arm64e
-Version: 2.5.1-18
-Section: Packaging
-Maintainer: wwg151 <wwg151@users.noreply.github.com>
-Depends: firmware (>= 11.0), firmware(>=12.2) | org.swift.libswift (>=5.0), coreutils (>= 8.30-1), dpkg (>= 1.19.4-1), apt (>= 1.8.2), libzstd1
-Filename: debs/sileo_roothide_长按下载免跳转.deb
-Size: 3519192
-MD5sum: 9a7a95a45bfcc521a58a1240999b826d
-SHA1: 200c16516dbe34bec69b4a68ceb02dbac1a6af68
-SHA256: 801175735ed1fc9a7536f7b09c7ab125abfc693a9aef9f93e987341101191a03
-SHA512: 2d959cb854cdb2625e9d68228b6cdeddb5ea0f237343196b1f2e45569eb213b01da0dca389f1e09000a596cee88bf225c8eefc9fc87fcb3f25cc913e3bb64934
-Description: A modern APT package manager frontend
-Name: Sileo
-Author: wwg151 <wwg151@users.noreply.github.com>
-Icon: https://getsileo.app/img/icon.png
-SileoDepiction: https://featuredpage.getsileo.app/depiction.json
-
