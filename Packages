@@ -1,21 +1,3 @@
-Package: org.coolstar.sileo
-Architecture: iphoneos-arm64e
-Version: 2.5.1-18
-Maintainer: wwg151 <wwg151@users.noreply.github.com>
-Depends: firmware (>= 11.0), firmware(>=12.2) | org.swift.libswift (>=5.0), coreutils (>= 8.30-1), dpkg (>= 1.19.4-1), apt (>= 1.8.2), libzstd1
-Filename: debs/sileo_roothide_长按下载免跳转.deb
-Size: 3519192
-MD5sum: 9a7a95a45bfcc521a58a1240999b826d
-SHA1: 200c16516dbe34bec69b4a68ceb02dbac1a6af68
-SHA256: 801175735ed1fc9a7536f7b09c7ab125abfc693a9aef9f93e987341101191a03
-SHA512: 2d959cb854cdb2625e9d68228b6cdeddb5ea0f237343196b1f2e45569eb213b01da0dca389f1e09000a596cee88bf225c8eefc9fc87fcb3f25cc913e3bb64934
-Section: Packaging
-Description: A modern APT package manager frontend
-Name: Sileo
-Author: wwg151 <wwg151@users.noreply.github.com>
-Icon: https://getsileo.app/img/icon.png
-SileoDepiction: https://featuredpage.getsileo.app/depiction.json
-
 Package: com.be-huge.insulation
 Architecture: iphoneos-arm64
 Version: 0.1.39.3
@@ -32,3 +14,21 @@ Section: Tweaks
 Description: 充电使用原生温控
 Name: insulation
 Author: be-huge & doimty & King
+
+Package: org.coolstar.sileo
+Architecture: iphoneos-arm64e
+Version: 2.5.1-18
+Maintainer: wwg151 <wwg151@users.noreply.github.com>
+Depends: firmware (>= 11.0), firmware(>=12.2) | org.swift.libswift (>=5.0), coreutils (>= 8.30-1), dpkg (>= 1.19.4-1), apt (>= 1.8.2), libzstd1
+Filename: debs/sileo_roothide_长按下载免跳转.deb
+Size: 3519192
+MD5sum: 9a7a95a45bfcc521a58a1240999b826d
+SHA1: 200c16516dbe34bec69b4a68ceb02dbac1a6af68
+SHA256: 801175735ed1fc9a7536f7b09c7ab125abfc693a9aef9f93e987341101191a03
+SHA512: 2d959cb854cdb2625e9d68228b6cdeddb5ea0f237343196b1f2e45569eb213b01da0dca389f1e09000a596cee88bf225c8eefc9fc87fcb3f25cc913e3bb64934
+Section: 插件
+Description: A modern APT package manager frontend
+Name: Sileo
+Author: wwg151 <wwg151@users.noreply.github.com>
+Icon: https://getsileo.app/img/icon.png
+SileoDepiction: https://featuredpage.getsileo.app/depiction.json
