@@ -1,3 +1,25 @@
+Package: com.dangkhoa.hotspotpro
+Architecture: iphoneos-arm64e
+Version: 0.7.0-cn4
+Maintainer: King <be-huge@local>
+Installed-Size: 1064
+Pre-Depends: rootless-compat(>= 0.9)
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)
+Conflicts: com.be-huge.hotspotprocn
+Replaces: com.be-huge.hotspotprocn
+Filename: debs/HotspotPro_0.7.0-cn4_iphoneos-arm64e.deb
+Size: 103504
+MD5sum: 1f465269721710da44c81c0d3cb44bee
+SHA1: 2d006a2a63e5545a402e1bd5b979387c5e99972f
+SHA256: 20740b5051109cff1412a2eefd438a5ea7f3de18ced3eb663b6e3a08e3f8ae0e
+SHA512: 7cf4e05305f4e554db205c520af8927a70c0cbeb5ea9317632ce72ea0c2ed6d0c68742cef58020c693e0a0ea09102252bf0852a3f2ae58aacff337fca9f54527
+Section: Tweaks
+Description: 统计个人热点共享流量、查看接入设备并限制单设备流量。设置界面已完整汉化，其余功能与原版一致。
+Tag: purpose::extension, role::enduser
+Name: HotspotPro (简体中文)
+Author: DangKhoa (汉化: King)
+icon: https://huayuarc.github.io/icon/HotspotPro.jpg
+
 Package: com.be-huge.insulation
 Architecture: iphoneos-arm64
 Version: 0.1.39.3
